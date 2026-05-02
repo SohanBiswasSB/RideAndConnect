@@ -9,13 +9,13 @@ import (
 	"github.com/google/uuid"
 )
 
-// jwtScope discriminates access tokens from short-lived ws tickets so a
-// stolen access token cannot be presented at the WS upgrade and vice versa.
+// jwtScope discriminates token kinds carried in JWTs. v1 only issues
+// `access` JWTs; the WS ticket is now a DB-backed opaque single-use
+// token (see internal/auth/wsticket.go) so it has no JWT representation.
 type jwtScope string
 
 const (
 	scopeAccess jwtScope = "access"
-	scopeWS     jwtScope = "ws"
 )
 
 // Claims is the canonical claim set. We avoid embedding PII (name/email);
@@ -31,21 +31,10 @@ func (s *Service) IssueAccessToken(userID uuid.UUID) (string, time.Time, error) 
 	return s.issueScoped(userID, scopeAccess, s.cfg.AccessTTL)
 }
 
-// IssueWSTicket signs a short-lived JWT scoped to the WS upgrade, used
-// when the client cannot set the Authorization header.
-func (s *Service) IssueWSTicket(userID uuid.UUID) (string, time.Time, error) {
-	return s.issueScoped(userID, scopeWS, s.cfg.WSTicketTTL)
-}
-
 // VerifyAccessToken parses and validates an access JWT. Returns the user
 // ID on success.
 func (s *Service) VerifyAccessToken(token string) (uuid.UUID, error) {
 	return s.verifyScoped(token, scopeAccess)
-}
-
-// VerifyWSTicket parses and validates a WS ticket JWT.
-func (s *Service) VerifyWSTicket(token string) (uuid.UUID, error) {
-	return s.verifyScoped(token, scopeWS)
 }
 
 func (s *Service) issueScoped(userID uuid.UUID, scope jwtScope, ttl time.Duration) (string, time.Time, error) {

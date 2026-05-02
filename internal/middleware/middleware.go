@@ -202,16 +202,33 @@ func newRequestID() string {
 	return hex.EncodeToString(b[:])
 }
 
+// trustProxyHeaders controls whether X-Forwarded-For / X-Real-Ip are
+// honored when reading the client IP. Default false: the API is only
+// behind a known reverse proxy when explicitly configured. When false,
+// both headers are ignored so a direct caller can't spoof the source IP
+// to bypass per-IP rate limits or pollute access logs.
+//
+// Set via SetTrustProxyHeaders at startup from the TRUST_PROXY_HEADERS
+// env var; should remain stable for the process lifetime.
+var trustProxyHeaders bool
+
+// SetTrustProxyHeaders is called once at startup before any handler
+// runs. Safe in that single-call context; not safe to call concurrently
+// with serving traffic.
+func SetTrustProxyHeaders(v bool) { trustProxyHeaders = v }
+
 func clientIP(r *http.Request) string {
-	if v := r.Header.Get("X-Forwarded-For"); v != "" {
-		// X-Forwarded-For can be a comma list; take the first.
-		if i := strings.IndexByte(v, ','); i > 0 {
-			return strings.TrimSpace(v[:i])
+	if trustProxyHeaders {
+		if v := r.Header.Get("X-Forwarded-For"); v != "" {
+			// X-Forwarded-For can be a comma list; take the first.
+			if i := strings.IndexByte(v, ','); i > 0 {
+				return strings.TrimSpace(v[:i])
+			}
+			return strings.TrimSpace(v)
 		}
-		return strings.TrimSpace(v)
-	}
-	if v := r.Header.Get("X-Real-Ip"); v != "" {
-		return v
+		if v := r.Header.Get("X-Real-Ip"); v != "" {
+			return v
+		}
 	}
 	host := r.RemoteAddr
 	if i := strings.LastIndexByte(host, ':'); i > 0 {

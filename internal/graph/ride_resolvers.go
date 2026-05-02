@@ -118,7 +118,9 @@ func (r *Resolver) EndRide(ctx context.Context, args struct{ RideID UUID }) (*ri
 		return nil, mapDomainErr(err)
 	}
 	if r.rideEndedHook != nil {
-		r.rideEndedHook(args.RideID.V, uid)
+		hook := r.rideEndedHook
+		rideID := args.RideID.V
+		asyncFire("ride.ended.broadcast", func() { hook(rideID, uid) })
 	}
 	return rideToResolver(ride), nil
 }
@@ -138,7 +140,10 @@ func (r *Resolver) SetDestination(ctx context.Context, args struct {
 		return nil, mapDomainErr(err)
 	}
 	if r.destinationHook != nil {
-		r.destinationHook(args.RideID.V, uid, d.Name, d.Latitude, d.Longitude)
+		hook := r.destinationHook
+		rideID := args.RideID.V
+		name, lat, lng := d.Name, d.Latitude, d.Longitude
+		asyncFire("destination.updated.broadcast", func() { hook(rideID, uid, name, lat, lng) })
 	}
 	return &destinationResolver{
 		name:      d.Name,

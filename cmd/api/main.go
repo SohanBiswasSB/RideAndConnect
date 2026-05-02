@@ -87,9 +87,11 @@ func run() error {
 		return fmt.Errorf("routes factory: %w", err)
 	}
 
+	middleware.SetTrustProxyHeaders(cfg.TrustProxyHeaders)
+
 	authSvc, usersSvc, ridesSvc := buildDomainServices(pool, cfg)
 	if ridesSvc != nil {
-		ridesSvc.AttachEngine(rides.EngineConfig{
+		ridesSvc.AttachEngine(rootCtx, rides.EngineConfig{
 			StaleTTL:     cfg.PeerRouteStaleTTL,
 			CacheTTL:     cfg.RouteCacheTTL,
 			PeerCacheTTL: cfg.PeerRouteCacheTTL,
@@ -179,6 +181,7 @@ func run() error {
 		log.Error().Err(err).Msg("graceful shutdown failed")
 		return err
 	}
+	hub.Stop(shutdownCtx)
 	return nil
 }
 

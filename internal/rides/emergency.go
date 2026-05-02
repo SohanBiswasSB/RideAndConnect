@@ -37,20 +37,22 @@ var (
 // empty snapshot (still useful as a "user is in distress" signal).
 //
 // Idempotent on a per-user basis: if the caller already has an unresolved
-// emergency, that event is returned (we don't open a duplicate).
-func (s *Service) TriggerEmergency(ctx context.Context, callerID uuid.UUID, message *string) (*EmergencyEvent, error) {
+// emergency, that event is returned with created=false. Resolvers use the
+// flag to skip the WS push so a panic-button mash doesn't fire repeated
+// notifications.
+func (s *Service) TriggerEmergency(ctx context.Context, callerID uuid.UUID, message *string) (event *EmergencyEvent, created bool, err error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("rides: begin emergency: %w", err)
+		return nil, false, fmt.Errorf("rides: begin emergency: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// If an active emergency exists, return it.
+	// If an active emergency exists, return it without re-pushing.
 	if existing, err := readActiveEmergency(ctx, tx, callerID); err != nil {
-		return nil, err
+		return nil, false, err
 	} else if existing != nil {
 		_ = tx.Rollback(ctx)
-		return existing, nil
+		return existing, false, nil
 	}
 
 	// Find the caller's active ride (if any) and snapshot members.
@@ -72,19 +74,19 @@ func (s *Service) TriggerEmergency(ctx context.Context, callerID uuid.UUID, mess
 				 WHERE ride_id = $1 AND left_at IS NULL AND user_id <> $2
 			`, rid, callerID)
 			if err != nil {
-				return nil, fmt.Errorf("rides: snapshot members: %w", err)
+				return nil, false, fmt.Errorf("rides: snapshot members: %w", err)
 			}
 			for rows.Next() {
 				var u uuid.UUID
 				if err := rows.Scan(&u); err != nil {
 					rows.Close()
-					return nil, err
+					return nil, false, err
 				}
 				notified = append(notified, u)
 			}
 			rows.Close()
 		} else if !errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("rides: lookup active ride: %w", err)
+			return nil, false, fmt.Errorf("rides: lookup active ride: %w", err)
 		}
 	}
 	if notified == nil {
@@ -101,13 +103,13 @@ func (s *Service) TriggerEmergency(ctx context.Context, callerID uuid.UUID, mess
 		&ev.NotifiedUserIDs, &ev.ResolvedAt, &ev.ResolvedByUserID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("rides: insert emergency: %w", err)
+		return nil, false, fmt.Errorf("rides: insert emergency: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("rides: commit emergency: %w", err)
+		return nil, false, fmt.Errorf("rides: commit emergency: %w", err)
 	}
-	return &ev, nil
+	return &ev, true, nil
 }
 
 // ResolveEmergency closes an emergency event. The triggering user OR any

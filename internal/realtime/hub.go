@@ -143,13 +143,15 @@ func (h *Hub) BroadcastRideEnded(rideID, endedBy uuid.UUID) {
 	r.closeAll(CloseRideEnded, "ride ended")
 }
 
-// Stop closes every room. Called during graceful shutdown.
+// Stop closes every room and clears the registry. Called during
+// graceful shutdown. Idempotent — calling twice is harmless.
 func (h *Hub) Stop(ctx context.Context) {
 	h.mu.Lock()
 	rooms := make([]*Room, 0, len(h.rooms))
 	for _, r := range h.rooms {
 		rooms = append(rooms, r)
 	}
+	h.rooms = make(map[uuid.UUID]*Room)
 	h.mu.Unlock()
 	for _, r := range rooms {
 		r.closeAll(1001, "server shutdown")

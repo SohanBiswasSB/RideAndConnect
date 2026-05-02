@@ -68,6 +68,19 @@ func (r *Resolver) SetDestinationHook(h DestinationHook) { r.destinationHook = h
 // SetRideEndedHook wires the WS broadcast for endRide.
 func (r *Resolver) SetRideEndedHook(h RideEndedHook) { r.rideEndedHook = h }
 
+// asyncFire runs a fan-out hook on a fresh goroutine with panic
+// recovery so a slow Hub or a broken room doesn't extend the GraphQL
+// response latency tail. Hooks are best-effort by design (a connection
+// dropped right before the broadcast loses the message regardless of
+// timing).
+func asyncFire(name string, fn func()) {
+	go func() {
+		defer func() { _ = recover() }()
+		fn()
+	}()
+	_ = name
+}
+
 // requireUser pulls the authed user ID out of the request context.
 // Resolvers that require auth call this first; UNAUTHENTICATED is the
 // stable code (see API.md §1.3).

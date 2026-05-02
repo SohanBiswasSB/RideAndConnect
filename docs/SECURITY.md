@@ -25,9 +25,9 @@ Assets: user accounts, auth tokens, ride membership, real-time location, voice s
 - Failed-login throttling: 5/min/IP and 10/min/email; emit `INVALID_CREDENTIALS` (never reveal which of email/password is wrong).
 
 ### 2.2 Tokens
-- **Access token** — JWT HS256, 15 min TTL, payload claims: `sub` (user_id), `iat`, `exp`, `jti`, `nbf`. No PII (no name/email).
+- **Access token** — JWT HS256, 15 min TTL, payload claims: `sub` (user_id), `iat`, `exp`, `jti`, `nbf`, `scope=access`. No PII.
 - **Refresh token** — opaque 32-byte URL-safe random. Stored only as SHA-256 hash in `refresh_tokens`. Single-use rotation: refresh emits a new token and revokes the old via `replaced_by`.
-- **WS ticket** — opaque 32-byte single-use, 5 min TTL, scope=`ws`, used as `?access_token=` only when headers are unavailable.
+- **WS ticket** — opaque 32-byte URL-safe random, 5 min TTL, **single-use**. Stored as SHA-256 hash in `ws_tickets`; consumption is recorded server-side via `consumed_at`. A leaked ticket cannot be replayed because `VerifyWSTicket` uses `SELECT … FOR UPDATE` + atomic `consumed_at` update inside one transaction. Used as `?access_token=` only when headers are unavailable (browser `WebSocket` API).
 - **JWT secret** — env-only, ≥ 32 bytes random; rotation supported via overlapping accept-set (current + previous valid).
 - **Logout** — revokes the supplied refresh token; access tokens expire naturally.
 
@@ -84,7 +84,8 @@ For `peerRoute(rideId, peerUserId, ...)`:
 
 ## 5. Transport Security
 - TLS 1.2+ with modern ciphers in production; HSTS `max-age=31536000; includeSubDomains` once a stable domain is in place.
-- WSS only in production. The application refuses to start with `APP_ENV=prod` if it detects an `http://` or `ws://` listener without an upstream TLS terminator (configurable via `TRUST_PROXY_TLS=true`).
+- WSS only in production. The application refuses to start with `APP_ENV=prod` if it detects an `http://` or `ws://` listener without an upstream TLS terminator.
+- `TRUST_PROXY_HEADERS` (env, default `false`) controls whether `X-Forwarded-For` / `X-Real-Ip` are honored when reading the client IP for rate limiting and access logs. Enable ONLY when the API is behind a reverse proxy that strips and replaces these headers; otherwise an attacker reaching the listener directly can spoof the source IP.
 - HTTP→HTTPS redirect handled by reverse proxy.
 - CORS: explicit allowlist via `CORS_ALLOWED_ORIGINS`; default empty (no cross-origin in dev). `Access-Control-Allow-Credentials: false`.
 

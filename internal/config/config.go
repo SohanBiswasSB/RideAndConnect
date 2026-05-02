@@ -101,7 +101,8 @@ type Config struct {
 	RateLimitRPS       int
 
 	// ── Privacy / feature flags ───────────────────────────────────────
-	LocationPersist bool
+	LocationPersist   bool
+	TrustProxyHeaders bool
 }
 
 // Load reads every supported variable from the process environment. It
@@ -197,6 +198,7 @@ func Load() (Config, error) {
 	bools := []entry{
 		{&c.WSPermessageDeflate, "WS_PERMESSAGE_DEFLATE", true},
 		{&c.LocationPersist, "LOCATION_PERSIST", false},
+		{&c.TrustProxyHeaders, "TRUST_PROXY_HEADERS", false},
 	}
 	for _, e := range bools {
 		v, err := readBool(e.key, e.dflt.(bool))

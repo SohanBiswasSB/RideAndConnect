@@ -108,8 +108,10 @@ type EngineConfig struct {
 	PeerCacheTTL time.Duration
 }
 
-// AttachEngine adds the route engine to the service. Idempotent.
-func (s *Service) AttachEngine(cfg EngineConfig) {
+// AttachEngine adds the route engine to the service. Idempotent. The ctx
+// bounds the lifetime of throttle-store sweeper goroutines — pass the
+// application root context.
+func (s *Service) AttachEngine(ctx context.Context, cfg EngineConfig) {
 	if s.engine != nil {
 		return
 	}
@@ -123,15 +125,15 @@ func (s *Service) AttachEngine(cfg EngineConfig) {
 		cfg.PeerCacheTTL = 60 * time.Second
 	}
 	s.engine = &RouteEngine{
-		cooldown:       30 * time.Second,
-		failThreshold:  5,
-		throttleUser:   newThrottle(2, 1.0/30.0),  // 1 / 30s with burst 2
-		throttleRide:   newThrottle(6, 1.0/100.0), // 6 / 10min
-		throttlePair:   newThrottle(2, 1.0/30.0),
-		throttlePeerR:  newThrottle(12, 12.0/600.0),
-		staleTTL:       cfg.StaleTTL,
-		cacheTTL:       cfg.CacheTTL,
-		peerCacheTTL:   cfg.PeerCacheTTL,
+		cooldown:      30 * time.Second,
+		failThreshold: 5,
+		throttleUser:  newThrottle(ctx, 2, 1.0/30.0),    // 1 / 30s with burst 2
+		throttleRide:  newThrottle(ctx, 6, 1.0/100.0),   // 6 / 10min
+		throttlePair:  newThrottle(ctx, 2, 1.0/30.0),
+		throttlePeerR: newThrottle(ctx, 12, 12.0/600.0),
+		staleTTL:      cfg.StaleTTL,
+		cacheTTL:      cfg.CacheTTL,
+		peerCacheTTL:  cfg.PeerCacheTTL,
 	}
 }
 
