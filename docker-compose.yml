@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: rideandconnect-postgres
+    environment:
+      POSTGRES_USER: rideandconnect
+      POSTGRES_PASSWORD: rideandconnect
+      POSTGRES_DB: rideandconnect
+    ports:
+      - "5432:5432"
+    volumes:
+      - rideandconnect-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rideandconnect -d rideandconnect"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      args:
+        VERSION: dev
+        COMMIT: dev
+        BUILD_TIME: dev
+    container_name: rideandconnect-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: dev
+      HTTP_ADDR: ":8080"
+      DATABASE_URL: postgres://rideandconnect:rideandconnect@postgres:5432/rideandconnect?sslmode=disable
+      JWT_SECRET: dev-secret-change-me-32-bytes-min-xx
+      LOG_LEVEL: debug
+    ports:
+      - "8080:8080"
+    profiles:
+      - full
+
+volumes:
+  rideandconnect-pgdata:

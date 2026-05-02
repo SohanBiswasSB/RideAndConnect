@@ -1,0 +1,293 @@
+# RideAndConnect — canonical GraphQL schema.
+# Source of truth for the API contract; mirror in docs/API.md §2.
+# Mounted at POST /api/v1/graphql. See docs/WEBSOCKET_PROTOCOL.md for the
+# realtime channel (independent of GraphQL — no subscriptions in v1).
+
+# ───── Custom scalars ─────
+scalar UUID         # canonical UUIDv4 string
+scalar DateTime     # RFC 3339 UTC
+
+# ───── Enums ─────
+enum RideStatus       { ACTIVE ENDED }
+enum RideMemberRole   { OWNER MEMBER }
+enum BikeRole         { RIDER PILLION }
+enum TravelMode       { TWO_WHEELER BICYCLE WALK }
+enum BloodType        { A_POS A_NEG B_POS B_NEG AB_POS AB_NEG O_POS O_NEG UNKNOWN }
+enum InvitationStatus { PENDING ACCEPTED DECLINED REVOKED EXPIRED }
+
+# ───── Object types ─────
+type EmergencyContact {
+  name:        String
+  phone:       String
+  email:       String
+  # Set when the contact is also a user in the system.
+  contactUserId: UUID
+}
+
+type TyrePressure {
+  frontSoloPsi:    Float
+  rearSoloPsi:     Float
+  frontPillionPsi: Float
+  rearPillionPsi:  Float
+}
+
+type User {
+  id:               UUID!
+  name:             String!
+  email:            String
+  phone:            String
+  initials:         String
+  bikeModel:        String
+  licensePlate:     String
+  defaultBikeRole:  BikeRole
+  bloodType:        BloodType
+  age:              Int
+  heightCm:         Int
+  weightKg:         Int
+  tyrePressure:     TyrePressure
+  emergencyContact: EmergencyContact
+  createdAt:        DateTime!
+}
+
+type AuthPayload {
+  user:         User!
+  accessToken:  String!
+  refreshToken: String!
+  expiresIn:    Int!
+}
+
+type WsTicket {
+  ticket:    String!
+  expiresIn: Int!
+}
+
+type Coordinates {
+  latitude:  Float!
+  longitude: Float!
+}
+
+type Destination {
+  name:       String!
+  placeId:    String
+  latitude:   Float!
+  longitude:  Float!
+  updatedAt:  DateTime!
+}
+
+type RideMember {
+  userId:    UUID!
+  name:      String!
+  initials:  String
+  role:      RideMemberRole!
+  joinedAt:  DateTime!
+  leftAt:    DateTime
+}
+
+# Active rider+pillion pairing within a ride.
+type RidePair {
+  id:            UUID!
+  rideId:        UUID!
+  riderUserId:   UUID!
+  pillionUserId: UUID!
+  pairedAt:      DateTime!
+  detachedAt:    DateTime
+}
+
+type Ride {
+  id:           UUID!
+  ownerUserId:  UUID!
+  inviteCode:   String!
+  status:       RideStatus!
+  destination:  Destination
+  startedAt:    DateTime!
+  endedAt:      DateTime
+  createdAt:    DateTime!
+  members:      [RideMember!]!
+  activePairs:  [RidePair!]!
+}
+
+# A push-style invitation: the owner addresses a known user (or any user
+# matching a license plate) and the user must accept to join. Coexists
+# with the pull-style invite-code flow.
+type RideInvitation {
+  id:             UUID!
+  rideId:         UUID!
+  invitedUserId:  UUID!
+  invitedBy:      UUID!
+  identifierUsed: String!
+  status:         InvitationStatus!
+  createdAt:      DateTime!
+  expiresAt:      DateTime!
+  respondedAt:    DateTime
+}
+
+# Recorded emergency. notifiedUserIds is the snapshot of the active ride
+# at trigger time; the WS push to those users is delivered in Phase 7.
+type EmergencyEvent {
+  id:                UUID!
+  triggeredByUserId: UUID!
+  rideId:            UUID
+  triggeredAt:       DateTime!
+  message:           String
+  notifiedUserIds:   [UUID!]!
+  resolvedAt:        DateTime
+  resolvedByUserId:  UUID
+}
+
+type Route {
+  rideId:           UUID!
+  userId:           UUID!
+  origin:           Coordinates!
+  destination:      Coordinates!
+  destinationName:  String!
+  distanceMeters:   Int!
+  durationSeconds:  Int!
+  encodedPolyline:  String!
+  provider:         String!
+  travelMode:       TravelMode!
+  computedAt:       DateTime!
+  cacheHit:         Boolean!
+}
+
+type PeerRoute {
+  rideId:           UUID!
+  fromUserId:       UUID!
+  toUserId:         UUID!
+  fromLocation:     Coordinates!
+  toLocation:       Coordinates!
+  fromLocationAt:   DateTime!
+  toLocationAt:     DateTime!
+  distanceMeters:   Int!
+  durationSeconds:  Int!
+  encodedPolyline:  String!
+  provider:         String!
+  travelMode:       TravelMode!
+  computedAt:       DateTime!
+  cacheHit:         Boolean!
+}
+
+# ───── Inputs ─────
+input CoordinatesInput {
+  latitude:  Float!
+  longitude: Float!
+}
+
+input EmergencyContactInput {
+  name:          String
+  phone:         String
+  email:         String
+  contactUserId: UUID
+}
+
+input TyrePressureInput {
+  frontSoloPsi:    Float
+  rearSoloPsi:     Float
+  frontPillionPsi: Float
+  rearPillionPsi:  Float
+}
+
+input RegisterInput {
+  name:             String!
+  email:            String
+  phone:            String
+  password:         String!
+  initials:         String
+  bikeModel:        String
+  licensePlate:     String
+  defaultBikeRole:  BikeRole
+  bloodType:        BloodType
+  age:              Int
+  heightCm:         Int
+  weightKg:         Int
+  tyrePressure:     TyrePressureInput
+  emergencyContact: EmergencyContactInput
+}
+
+input UpdateProfileInput {
+  name:             String
+  initials:         String
+  bikeModel:        String
+  licensePlate:     String
+  defaultBikeRole:  BikeRole
+  bloodType:        BloodType
+  age:              Int
+  heightCm:         Int
+  weightKg:         Int
+  tyrePressure:     TyrePressureInput
+  emergencyContact: EmergencyContactInput
+}
+
+input LoginInput {
+  email:    String
+  phone:    String
+  password: String!
+}
+
+input DestinationInput {
+  name:      String!
+  placeId:   String
+  latitude:  Float!
+  longitude: Float!
+}
+
+input ComputeRouteInput {
+  origin:     CoordinatesInput!
+  travelMode: TravelMode = TWO_WHEELER
+}
+
+input PeerRouteInput {
+  travelMode:     TravelMode = TWO_WHEELER
+  originOverride: CoordinatesInput
+}
+
+# ───── Operations ─────
+type Query {
+  me:                                                    User!
+  ride(rideId: UUID!):                                   Ride!
+  rideMembers(rideId: UUID!):                            [RideMember!]!
+  destination(rideId: UUID!):                            Destination
+  myRoute(rideId: UUID!):                                Route
+  peerRoute(rideId: UUID!, peerUserId: UUID!,
+            input: PeerRouteInput):                      PeerRoute!
+  myInvitations:                                         [RideInvitation!]!
+  myActiveEmergency:                                     EmergencyEvent
+}
+
+type Mutation {
+  # Auth
+  register(input: RegisterInput!):                       AuthPayload!
+  login(input: LoginInput!):                             AuthPayload!
+  refresh(refreshToken: String!):                        AuthPayload!
+  logout(refreshToken: String!):                         Boolean!
+  wsTicket:                                              WsTicket!
+
+  # Profile
+  updateProfile(input: UpdateProfileInput!):             User!
+
+  # Ride lifecycle
+  createRide(destination: DestinationInput):             Ride!
+  joinRide(rideId: UUID!, inviteCode: String!):          Ride!
+  leaveRide(rideId: UUID!):                              Boolean!
+  endRide(rideId: UUID!):                                Ride!
+
+  # Destination & route
+  setDestination(rideId: UUID!, input: DestinationInput!):    Destination!
+  computeRoute(rideId: UUID!, input: ComputeRouteInput!):     Route!
+
+  # Rider/pillion pairing
+  pairWithRider(rideId: UUID!, riderUserId: UUID!):      RidePair!
+  detachFromRider(rideId: UUID!):                        Boolean!
+
+  # Push-style invitations: identifier = email | phone | license plate.
+  # A plate match may resolve to multiple users (returns one invitation
+  # per matched user). Caller must be a member of the ride.
+  inviteByIdentifier(rideId: UUID!, identifier: String!): [RideInvitation!]!
+  acceptInvitation(invitationId: UUID!):                 Ride!
+  declineInvitation(invitationId: UUID!):                Boolean!
+  revokeInvitation(invitationId: UUID!):                 Boolean!
+
+  # Emergency. Trigger snapshots the active ride membership and records
+  # an event. Resolve clears it. WS push to notified members lands in Phase 7.
+  triggerEmergency(message: String):                     EmergencyEvent!
+  resolveEmergency(eventId: UUID!):                      EmergencyEvent!
+}
