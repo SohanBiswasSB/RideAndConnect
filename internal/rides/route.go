@@ -85,19 +85,27 @@ type LastLocation struct {
 //
 // A small circuit breaker is wrapped around provider calls; exceeded
 // failure thresholds trip the breaker into Open for cooldown seconds.
+//
+// A daily-cap counter short-circuits provider calls once a configurable
+// budget is reached, resetting at UTC midnight. Cache hits continue to
+// serve while the cap is exceeded.
 type RouteEngine struct {
-	mu             sync.Mutex
-	failures       atomic.Int32
-	openedAt       time.Time
-	cooldown       time.Duration
-	failThreshold  int32
-	throttleUser   *throttleStore // per (user, ride) for computeRoute
-	throttleRide   *throttleStore // per ride for computeRoute
-	throttlePair   *throttleStore // per (caller, peer) for peerRoute
-	throttlePeerR  *throttleStore // per ride for peerRoute
-	staleTTL       time.Duration
-	cacheTTL       time.Duration
-	peerCacheTTL   time.Duration
+	mu            sync.Mutex
+	failures      atomic.Int32
+	openedAt      time.Time
+	cooldown      time.Duration
+	failThreshold int32
+	throttleUser  *throttleStore // per (user, ride) for computeRoute
+	throttleRide  *throttleStore // per ride for computeRoute
+	throttlePair  *throttleStore // per (caller, peer) for peerRoute
+	throttlePeerR *throttleStore // per ride for peerRoute
+	staleTTL      time.Duration
+	cacheTTL      time.Duration
+	peerCacheTTL  time.Duration
+
+	dailyCap     int32 // 0 = unlimited
+	callsToday   atomic.Int32
+	currentDayUT atomic.Int64 // unix-day for which callsToday is valid
 }
 
 // EngineConfig is what main.go passes to wire defaults from
@@ -106,6 +114,10 @@ type EngineConfig struct {
 	StaleTTL     time.Duration
 	CacheTTL     time.Duration
 	PeerCacheTTL time.Duration
+
+	// DailyCap limits paid provider calls per UTC day. Zero disables
+	// the cap.
+	DailyCap int
 }
 
 // AttachEngine adds the route engine to the service. Idempotent. The ctx
@@ -134,7 +146,33 @@ func (s *Service) AttachEngine(ctx context.Context, cfg EngineConfig) {
 		staleTTL:      cfg.StaleTTL,
 		cacheTTL:      cfg.CacheTTL,
 		peerCacheTTL:  cfg.PeerCacheTTL,
+		dailyCap:      int32(cfg.DailyCap),
 	}
+}
+
+// tryReserveProviderCall implements the daily-cap budget. Returns false
+// when the cap has been reached for the current UTC day. Cache hits
+// continue to serve while the cap is exceeded — this guards only paid
+// upstream calls.
+func (e *RouteEngine) tryReserveProviderCall(now time.Time) bool {
+	if e.dailyCap <= 0 {
+		return true
+	}
+	today := now.UTC().Unix() / 86400
+	prev := e.currentDayUT.Load()
+	if prev != today {
+		// Roll over. CAS guards a concurrent rollover from another
+		// goroutine.
+		if e.currentDayUT.CompareAndSwap(prev, today) {
+			e.callsToday.Store(0)
+		}
+	}
+	// Atomic increment-then-check; if we go over, decrement and refuse.
+	if n := e.callsToday.Add(1); n > e.dailyCap {
+		e.callsToday.Add(-1)
+		return false
+	}
+	return true
 }
 
 // breakerAllow returns false when the breaker is Open.
@@ -239,8 +277,12 @@ func (s *Service) ComputeRoute(ctx context.Context, provider routes.Provider, ri
 		}, nil
 	}
 
-	if !s.engine.breakerAllow(time.Now()) {
+	now := time.Now()
+	if !s.engine.breakerAllow(now) {
 		return nil, fmt.Errorf("%w: provider circuit open", ErrUpstream)
+	}
+	if !s.engine.tryReserveProviderCall(now) {
+		return nil, fmt.Errorf("%w: daily provider cap exceeded", ErrUpstream)
 	}
 
 	resp, err := provider.Compute(ctx, routes.ComputeRequest{
@@ -411,6 +453,9 @@ func (s *Service) PeerRoute(ctx context.Context, provider routes.Provider, prese
 	}
 	if provider == nil {
 		return nil, fmt.Errorf("%w: provider not configured", ErrUpstream)
+	}
+	if !s.engine.tryReserveProviderCall(now) {
+		return nil, fmt.Errorf("%w: daily provider cap exceeded", ErrUpstream)
 	}
 	resp, err := provider.Compute(ctx, routes.ComputeRequest{
 		Origin:      routes.Point{Latitude: fromLoc.Latitude, Longitude: fromLoc.Longitude},

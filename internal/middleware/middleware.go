@@ -11,11 +11,25 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
 )
+
+// chiRouteContext returns the matched chi route pattern (e.g.
+// "/api/v1/rides/{rideId}/route") for low-cardinality metric labels.
+// Returns "" when no chi context is attached.
+func chiRouteContext(r *http.Request) string {
+	if rctx := chi.RouteContext(r.Context()); rctx != nil {
+		if pat := rctx.RoutePattern(); pat != "" {
+			return pat
+		}
+	}
+	return ""
+}
 
 // requestIDHeader is the canonical header. Lowercase for chi's MIME map.
 const requestIDHeader = "X-Request-Id"
@@ -67,12 +81,19 @@ func LoggerFromContext(ctx context.Context) zerolog.Logger {
 	return zerolog.Nop()
 }
 
+// HTTPRequestCounter is the small surface Logger needs from the
+// metrics package; it accepts a route label and a numeric status. Pass
+// nil to disable metric emission.
+type HTTPRequestCounter interface {
+	IncRequest(route, status string)
+}
+
 // Logger emits one structured line per request including request_id,
 // method, path, status, latency_ms, remote_addr. The body is never logged.
 //
 // It also pins a child logger into the context so handlers can call
 // LoggerFromContext(ctx) and inherit request_id automatically.
-func Logger(base zerolog.Logger) func(http.Handler) http.Handler {
+func Logger(base zerolog.Logger, m HTTPRequestCounter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
@@ -98,8 +119,23 @@ func Logger(base zerolog.Logger) func(http.Handler) http.Handler {
 				ev = ev.Int64("bytes", ww.bytes)
 			}
 			ev.Msg("http")
+
+			if m != nil {
+				m.IncRequest(routeLabel(r), strconv.Itoa(ww.status))
+			}
 		})
 	}
+}
+
+// routeLabel returns a low-cardinality label for the request — the
+// chi-mounted route pattern when available, otherwise the literal path.
+// Without this, a high-cardinality endpoint like /api/v1/rides/{id}/...
+// would explode the Prometheus label space.
+func routeLabel(r *http.Request) string {
+	if rctx := chiRouteContext(r); rctx != "" {
+		return rctx
+	}
+	return r.URL.Path
 }
 
 // Recoverer catches panics in downstream handlers, logs them, and

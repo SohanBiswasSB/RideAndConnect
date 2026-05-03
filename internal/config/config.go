@@ -77,6 +77,7 @@ type Config struct {
 	RouteCacheTTL      time.Duration
 	PeerRouteCacheTTL  time.Duration
 	PeerRouteStaleTTL  time.Duration
+	RouteProviderDailyCap int
 
 	// ── WebSocket / wire / QoS ────────────────────────────────────────
 	WSDefaultCodec        string // "toon" | "json"
@@ -172,6 +173,7 @@ func Load() (Config, error) {
 		{&c.WSTierRTTLowMS, "WS_TIER_RTT_LOW_MS", 600},
 		{&c.WSTierRTTCriticalMS, "WS_TIER_RTT_CRITICAL_MS", 1500},
 		{&c.RateLimitRPS, "RATE_LIMIT_RPS", 20},
+		{&c.RouteProviderDailyCap, "ROUTE_PROVIDER_DAILY_CAP", 0},
 	}
 	for _, e := range ints {
 		v, err := readInt(e.key, e.dflt.(int))

@@ -7,9 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Sentinel errors. Resolvers map these to docs/API.md §1.3 codes.
@@ -33,10 +34,18 @@ type Config struct {
 	WSTicketTTL  time.Duration
 }
 
+// AuditRecorder is the small surface auth needs from internal/audit;
+// kept as an interface to avoid an import cycle if audit ever needs
+// auth helpers in the future.
+type AuditRecorder interface {
+	Record(actorUserID *uuid.UUID, rideID *uuid.UUID, eventType string, metadata map[string]any)
+}
+
 // Service is the auth domain entry point.
 type Service struct {
-	pool *pgxpool.Pool
-	cfg  Config
+	pool  *pgxpool.Pool
+	cfg   Config
+	audit AuditRecorder
 }
 
 // NewService constructs the auth service. JWTSecret must be ≥ 32 bytes —
@@ -44,6 +53,9 @@ type Service struct {
 func NewService(pool *pgxpool.Pool, cfg Config) *Service {
 	return &Service{pool: pool, cfg: cfg}
 }
+
+// SetAudit wires an audit recorder. Optional — nil is a safe no-op.
+func (s *Service) SetAudit(a AuditRecorder) { s.audit = a }
 
 // RegisterInput captures everything needed to create a user. Either email
 // or phone is required; everything else is optional and may be edited
@@ -136,15 +148,18 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (*AuthResult, 
 		in.EmergencyContactName, in.EmergencyContactPhone, in.EmergencyContactEmail, in.EmergencyContactUserID,
 	).Scan(&userID)
 	if err != nil {
-		if isUniqueViolation(err, "users_email_key") {
+		switch uniqueConstraint(err) {
+		case "users_email_key":
 			return nil, ErrEmailTaken
-		}
-		if isUniqueViolation(err, "users_phone_key") {
+		case "users_phone_key":
 			return nil, ErrPhoneTaken
 		}
 		return nil, fmt.Errorf("auth: insert user: %w", err)
 	}
 
+	if s.audit != nil {
+		s.audit.Record(&userID, nil, "user.registered", map[string]any{"name": in.Name})
+	}
 	return s.issueTokens(ctx, userID)
 }
 
@@ -186,6 +201,9 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (*AuthResult, error)
 		return nil, ErrInvalidCredentials
 	}
 
+	if s.audit != nil {
+		s.audit.Record(&userID, nil, "user.logged_in", nil)
+	}
 	return s.issueTokens(ctx, userID)
 }
 
@@ -354,22 +372,17 @@ func normalizePlate(p *string) *string {
 	return &v
 }
 
-// isUniqueViolation matches both the constraint name and the broad SQLSTATE.
-// pgx surfaces `*pgconn.PgError` with Code "23505" for unique violations.
-func isUniqueViolation(err error, constraintHint string) bool {
-	type pgErr interface {
-		SQLState() string
-		Error() string
+// uniqueConstraint returns the constraint name on a unique-violation
+// (SQLSTATE 23505), or "" otherwise. Uses pgconn.PgError directly so we
+// don't rely on substring-matching error text across pgx versions.
+func uniqueConstraint(err error) string {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return ""
 	}
-	var pe pgErr
-	if !errors.As(err, &pe) {
-		return false
+	if pgErr.Code != "23505" {
+		return ""
 	}
-	if pe.SQLState() != "23505" {
-		return false
-	}
-	// pgconn.PgError exposes Constraint/Detail; we substring-match the
-	// constraint name in the error string for portability across pgx
-	// versions without importing pgconn directly.
-	return strings.Contains(pe.Error(), constraintHint) || strings.Contains(pe.Error(), strings.TrimSuffix(constraintHint, "_key"))
+	return pgErr.ConstraintName
 }
+

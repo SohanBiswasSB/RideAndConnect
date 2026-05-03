@@ -61,10 +61,10 @@ func (s *Service) Pair(ctx context.Context, rideID, callerID, riderID uuid.UUID)
 	if err != nil {
 		// Translate the partial-unique-index violations into specific
 		// user-facing sentinels.
-		if isUniqueViolation(err, "ride_pairs_active_rider_uidx") {
+		switch uniqueConstraint(err) {
+		case "ride_pairs_active_rider_uidx":
 			return nil, ErrPairExists
-		}
-		if isUniqueViolation(err, "ride_pairs_active_pillion_uidx") {
+		case "ride_pairs_active_pillion_uidx":
 			return nil, ErrPillionPaired
 		}
 		return nil, fmt.Errorf("rides: insert pair: %w", err)
@@ -72,6 +72,9 @@ func (s *Service) Pair(ctx context.Context, rideID, callerID, riderID uuid.UUID)
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("rides: commit: %w", err)
+	}
+	if s.audit != nil {
+		s.audit.Record(&callerID, &rideID, "ride.pair_created", map[string]any{"rider_user_id": riderID, "pillion_user_id": callerID})
 	}
 	return &p, nil
 }
@@ -94,6 +97,9 @@ func (s *Service) Detach(ctx context.Context, rideID, callerID uuid.UUID) error 
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotPaired
+	}
+	if s.audit != nil {
+		s.audit.Record(&callerID, &rideID, "ride.pair_detached", nil)
 	}
 	return nil
 }

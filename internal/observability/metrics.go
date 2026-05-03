@@ -75,3 +75,70 @@ func New() *Metrics {
 func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{Registry: m.registry})
 }
+
+// ─── small typed wrappers ───────────────────────────────────────────────
+// These satisfy the narrow interfaces in middleware / realtime / rides
+// without those packages having to import prometheus/client_golang.
+
+// IncRequest is the HTTPRequestCounter implementation.
+func (m *Metrics) IncRequest(route, status string) {
+	if m == nil {
+		return
+	}
+	m.HTTPRequests.WithLabelValues(route, status).Inc()
+}
+
+// IncWSMessage is incremented in WS read/write loops.
+func (m *Metrics) IncWSMessage(msgType, direction string) {
+	if m == nil {
+		return
+	}
+	m.WSMessages.WithLabelValues(msgType, direction).Inc()
+}
+
+// WSConnectionOpened / Closed track gauge.
+func (m *Metrics) WSConnectionOpened() {
+	if m == nil {
+		return
+	}
+	m.WSConnections.Inc()
+}
+func (m *Metrics) WSConnectionClosed() {
+	if m == nil {
+		return
+	}
+	m.WSConnections.Dec()
+}
+
+// IncRouteProvider is incremented by the rides service after a provider
+// call (or cache hit / breaker open / throttle).
+func (m *Metrics) IncRouteProvider(provider, outcome string) {
+	if m == nil {
+		return
+	}
+	m.RouteProviderCalls.WithLabelValues(provider, outcome).Inc()
+}
+
+// IncRouteCache is incremented on cache hit/miss.
+func (m *Metrics) IncRouteCache(kind, result string) {
+	if m == nil {
+		return
+	}
+	m.RouteCacheLookups.WithLabelValues(kind, result).Inc()
+}
+
+// IncEmergency is incremented on each fresh emergency event.
+func (m *Metrics) IncEmergency() {
+	if m == nil {
+		return
+	}
+	m.EmergencyEvents.Inc()
+}
+
+// IncPair is incremented on pair create / detach.
+func (m *Metrics) IncPair(event string) {
+	if m == nil {
+		return
+	}
+	m.PairEvents.WithLabelValues(event).Inc()
+}

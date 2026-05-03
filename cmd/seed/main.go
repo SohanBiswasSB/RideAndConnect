@@ -93,6 +93,12 @@ func main() {
 }
 
 func run() error {
+	// Hard-refuse in production. The seed users have phone-as-password,
+	// which is fine for dev demos but unsafe to plant in a prod DB.
+	if env := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV"))); env == "prod" || env == "production" {
+		return errors.New("seed: refusing to run with APP_ENV=prod (dev users use phone-as-password)")
+	}
+
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		return errors.New("DATABASE_URL not set")

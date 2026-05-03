@@ -28,11 +28,12 @@ const (
 // Connection is one WS pipe to a single (user, ride). Read and write
 // pumps run as goroutines coordinated by the connection's context.
 type Connection struct {
-	conn   *websocket.Conn
-	userID uuid.UUID
-	name   string
-	room   *Room
-	log    zerolog.Logger
+	conn    *websocket.Conn
+	userID  uuid.UUID
+	name    string
+	room    *Room
+	log     zerolog.Logger
+	metrics ConnectionMetrics
 
 	// pairedWithPillion is set when this user is the RIDER in an active
 	// pair on this ride; their location.broadcast carries the pillion's
@@ -51,13 +52,14 @@ type Connection struct {
 // newConnection wires the goroutines and registers presence with the
 // room. Caller is responsible for blocking on `Run` until the pumps
 // complete.
-func newConnection(parent context.Context, conn *websocket.Conn, room *Room, userID uuid.UUID, name string, pairedWith, pairedAs uuid.UUID, log zerolog.Logger) *Connection {
+func newConnection(parent context.Context, conn *websocket.Conn, room *Room, userID uuid.UUID, name string, pairedWith, pairedAs uuid.UUID, log zerolog.Logger, metrics ConnectionMetrics) *Connection {
 	ctx, cancel := context.WithCancel(parent)
 	return &Connection{
 		conn:               conn,
 		userID:             userID,
 		name:               name,
 		room:               room,
+		metrics:            metrics,
 		pairedWithPillion:  pairedWith,
 		pairedAsPillionFor: pairedAs,
 		sendCh:             make(chan Envelope, sendQueueCap),
@@ -76,10 +78,17 @@ func newConnection(parent context.Context, conn *websocket.Conn, room *Room, use
 func (c *Connection) Run() {
 	c.room.register(c)
 	c.room.announcePresence(TypeRiderOnline, c.userID, c.name)
+	c.sendHello()
+	if c.metrics != nil {
+		c.metrics.WSConnectionOpened()
+	}
 	defer func() {
 		c.room.unregister(c)
 		c.room.purgePresenceFor(c.userID)
 		c.room.announcePresence(TypeRiderOffline, c.userID, c.name)
+		if c.metrics != nil {
+			c.metrics.WSConnectionClosed()
+		}
 	}()
 
 	done := make(chan struct{})
@@ -188,6 +197,27 @@ func (c *Connection) sendError(code, msg string) {
 	body, _ := json.Marshal(ErrorPayload{Code: code, Message: msg})
 	c.enqueue(Envelope{
 		Type:      TypeError,
+		RideID:    c.room.rideID,
+		Timestamp: time.Now().UTC(),
+		Payload:   body,
+	})
+}
+
+// sendHello is the first server-emitted frame after a successful
+// upgrade. Tells the client to publish its current location now so
+// peerRoute and the map come back online quickly after a reconnect
+// instead of waiting for the next sample tick.
+func (c *Connection) sendHello() {
+	body, err := json.Marshal(HelloPayload{
+		UserID:         c.userID,
+		PublishNow:     true,
+		PingIntervalMS: int(pingInterval.Milliseconds()),
+	})
+	if err != nil {
+		return
+	}
+	c.enqueue(Envelope{
+		Type:      TypeSystemHello,
 		RideID:    c.room.rideID,
 		Timestamp: time.Now().UTC(),
 		Payload:   body,

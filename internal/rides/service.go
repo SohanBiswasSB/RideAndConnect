@@ -10,17 +10,28 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// AuditRecorder is the small surface rides needs from internal/audit;
+// kept as an interface to avoid an import cycle.
+type AuditRecorder interface {
+	Record(actorUserID *uuid.UUID, rideID *uuid.UUID, eventType string, metadata map[string]any)
+}
 
 // Service is the rides domain entry point.
 type Service struct {
 	pool   *pgxpool.Pool
 	engine *RouteEngine
+	audit  AuditRecorder
 }
 
 // NewService constructs a Service.
 func NewService(pool *pgxpool.Pool) *Service { return &Service{pool: pool} }
+
+// SetAudit wires an audit recorder. Optional — nil is a safe no-op.
+func (s *Service) SetAudit(a AuditRecorder) { s.audit = a }
 
 // Create starts a new ride owned by the caller. Optional destination is
 // set atomically with the ride row. Returns the fully hydrated Ride.
@@ -51,6 +62,9 @@ func (s *Service) Create(ctx context.Context, ownerID uuid.UUID, dest *Destinati
 		return nil, fmt.Errorf("rides: commit: %w", err)
 	}
 
+	if s.audit != nil {
+		s.audit.Record(&ownerID, &rideID, "ride.created", nil)
+	}
 	return s.Get(ctx, rideID, ownerID)
 }
 
@@ -88,7 +102,7 @@ func (s *Service) insertRideWithFreshCode(ctx context.Context, tx pgx.Tx, ownerI
 		if err == nil {
 			return rideID, nil
 		}
-		if !isUniqueViolation(err, "rides_invite_code_active_uidx") {
+		if uniqueConstraint(err) != "rides_invite_code_active_uidx" {
 			return uuid.Nil, fmt.Errorf("rides: insert ride: %w", err)
 		}
 	}
@@ -183,6 +197,9 @@ func (s *Service) Join(ctx context.Context, rideID uuid.UUID, callerID uuid.UUID
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("rides: commit: %w", err)
+	}
+	if s.audit != nil {
+		s.audit.Record(&callerID, &rideID, "ride.member_joined", nil)
 	}
 	return s.Get(ctx, rideID, callerID)
 }
@@ -325,6 +342,9 @@ func (s *Service) End(ctx context.Context, rideID, callerID uuid.UUID) (*Ride, e
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("rides: commit: %w", err)
+	}
+	if s.audit != nil {
+		s.audit.Record(&callerID, &rideID, "ride.ended", nil)
 	}
 	return s.Get(ctx, rideID, callerID)
 }
@@ -523,14 +543,17 @@ func validateDestination(d *DestinationInput) error {
 	return nil
 }
 
-func isUniqueViolation(err error, hint string) bool {
-	type pgErr interface{ SQLState() string }
-	var pe pgErr
-	if !errors.As(err, &pe) {
-		return false
+// uniqueConstraint returns the constraint name on a unique-violation
+// (SQLSTATE 23505), or "" otherwise. See identical helper in
+// internal/auth/service.go — kept package-local so each domain owns its
+// constraint vocabulary.
+func uniqueConstraint(err error) string {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return ""
 	}
-	if pe.SQLState() != "23505" {
-		return false
+	if pgErr.Code != "23505" {
+		return ""
 	}
-	return strings.Contains(err.Error(), hint)
+	return pgErr.ConstraintName
 }

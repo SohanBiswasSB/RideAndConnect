@@ -10,12 +10,20 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// ConnectionMetrics is the small surface the Hub uses to feed
+// observability counters. Pass nil to disable.
+type ConnectionMetrics interface {
+	WSConnectionOpened()
+	WSConnectionClosed()
+}
+
 // Hub owns one Room per active ride. Rooms are created lazily on first
 // connection and torn down ~30 s after the last connection closes.
 type Hub struct {
-	mu    sync.RWMutex
-	rooms map[uuid.UUID]*Room
-	log   zerolog.Logger
+	mu      sync.RWMutex
+	rooms   map[uuid.UUID]*Room
+	log     zerolog.Logger
+	metrics ConnectionMetrics
 }
 
 // NewHub builds a fresh Hub.
@@ -25,6 +33,14 @@ func NewHub(log zerolog.Logger) *Hub {
 		log:   log.With().Str("component", "ws_hub").Logger(),
 	}
 }
+
+// SetMetrics wires the observability counters. Optional — nil is a
+// safe no-op.
+func (h *Hub) SetMetrics(m ConnectionMetrics) { h.metrics = m }
+
+// MetricsSink returns the connection metrics sink (or nil) so the
+// upgrade handler can pass it to each Connection.
+func (h *Hub) MetricsSink() ConnectionMetrics { return h.metrics }
 
 // getOrCreateRoom returns the Room for a ride, creating it if absent.
 func (h *Hub) getOrCreateRoom(rideID uuid.UUID) *Room {

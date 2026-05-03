@@ -2,7 +2,6 @@ package graph
 
 import (
 	"context"
-	"time"
 
 	"github.com/SohanBiswasSB/rideandconnect/internal/rides"
 	"github.com/SohanBiswasSB/rideandconnect/internal/routes"
@@ -123,7 +122,7 @@ func (r *Resolver) MyRoute(ctx context.Context, args struct{ RideID UUID }) (*ro
 		encodedPolyline: res.EncodedPolyline,
 		provider:        res.Provider,
 		travelMode:      string(res.TravelMode),
-		computedAt:      DateTime{T: ifZero(res.ComputedAt)},
+		computedAt:      DateTime{T: res.ComputedAt},
 		cacheHit:        res.CacheHit,
 	}, nil
 }
@@ -165,16 +164,9 @@ func (r *Resolver) ComputeRoute(ctx context.Context, args struct {
 		encodedPolyline: res.EncodedPolyline,
 		provider:        res.Provider,
 		travelMode:      string(res.TravelMode),
-		computedAt:      DateTime{T: ifZero(res.ComputedAt)},
+		computedAt:      DateTime{T: res.ComputedAt},
 		cacheHit:        res.CacheHit,
 	}, nil
-}
-
-func ifZero(t time.Time) time.Time {
-	if t.IsZero() {
-		return time.Now().UTC()
-	}
-	return t
 }
 
 // PeerRoute query. Phase 6 wired: presence lookup, pair short-circuit,
@@ -229,7 +221,7 @@ func (r *Resolver) PeerRoute(ctx context.Context, args struct {
 		encodedPolyline: res.EncodedPolyline,
 		provider:        res.Provider,
 		travelMode:      string(res.TravelMode),
-		computedAt:      DateTime{T: ifZero(res.ComputedAt)},
+		computedAt:      DateTime{T: res.ComputedAt},
 		cacheHit:        res.CacheHit,
 	}, nil
 }

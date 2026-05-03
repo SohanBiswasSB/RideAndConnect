@@ -83,7 +83,7 @@ func UpgradeHandler(hub *Hub, auth AuthVerifier, members MembershipChecker, name
 		}
 
 		room := hub.getOrCreateRoom(rideID)
-		c := newConnection(r.Context(), conn, room, userID, name, pairedWith, pairedAs, log)
+		c := newConnection(r.Context(), conn, room, userID, name, pairedWith, pairedAs, log, hub.MetricsSink())
 		c.Run()
 	}
 }

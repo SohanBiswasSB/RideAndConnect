@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 
+	"github.com/SohanBiswasSB/rideandconnect/internal/audit"
 	"github.com/SohanBiswasSB/rideandconnect/internal/auth"
 	"github.com/SohanBiswasSB/rideandconnect/internal/config"
 	"github.com/SohanBiswasSB/rideandconnect/internal/database"
@@ -80,6 +81,7 @@ func run() error {
 	}
 	if pool != nil {
 		defer pool.Close()
+		database.StartPruneSweeper(rootCtx, pool, log)
 	}
 
 	factory, err := buildRoutesFactory(cfg, log)
@@ -90,16 +92,27 @@ func run() error {
 	middleware.SetTrustProxyHeaders(cfg.TrustProxyHeaders)
 
 	authSvc, usersSvc, ridesSvc := buildDomainServices(pool, cfg)
+	auditRec := audit.New(pool, log)
+	if authSvc != nil && auditRec != nil {
+		authSvc.SetAudit(auditRec)
+	}
+	if ridesSvc != nil && auditRec != nil {
+		ridesSvc.SetAudit(auditRec)
+	}
 	if ridesSvc != nil {
 		ridesSvc.AttachEngine(rootCtx, rides.EngineConfig{
 			StaleTTL:     cfg.PeerRouteStaleTTL,
 			CacheTTL:     cfg.RouteCacheTTL,
 			PeerCacheTTL: cfg.PeerRouteCacheTTL,
+			DailyCap:     cfg.RouteProviderDailyCap,
 		})
 	}
 	provider := &activeProvider{factory: factory, name: string(cfg.RouteProvider)}
 
+	metrics := observability.New()
+
 	hub := realtime.NewHub(log)
+	hub.SetMetrics(metrics)
 	resolver := graph.NewResolver(authSvc, usersSvc, ridesSvc, provider)
 	if ridesSvc != nil && hub != nil {
 		resolver.SetPresence(presenceAdapter{hub: hub})
@@ -108,8 +121,6 @@ func run() error {
 		resolver.SetRideEndedHook(hub.BroadcastRideEnded)
 	}
 
-	metrics := observability.New()
-
 	gqlHandler, err := graph.NewHandler(resolver, cfg.IntrospectionEnabled())
 	if err != nil {
 		return fmt.Errorf("graphql handler: %w", err)
@@ -117,7 +128,7 @@ func run() error {
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID())
-	r.Use(middleware.Logger(log))
+	r.Use(middleware.Logger(log, metrics))
 	r.Use(middleware.Recoverer())
 	r.Use(middleware.MaxBodyBytes(64 * 1024))
 	r.Use(middleware.CORS(cfg.CORSAllowedOrigins))

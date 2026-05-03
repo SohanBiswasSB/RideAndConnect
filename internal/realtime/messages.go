@@ -43,8 +43,19 @@ const (
 	TypeRideEnded           = "ride.ended"
 	TypeDestinationUpdated  = "destination.updated"
 	TypeEmergencyTriggered  = "emergency.triggered"
+	TypeSystemHello         = "system.hello"
 	TypeError               = "error"
 )
+
+// HelloPayload is what the server sends immediately after a successful
+// upgrade. Clients should respond by publishing their current location
+// (rather than waiting for their next sample tick) so peerRoute and the
+// map view come back online quickly after a reconnect.
+type HelloPayload struct {
+	UserID         uuid.UUID `json:"user_id"`
+	PublishNow     bool      `json:"publish_now"`
+	PingIntervalMS int       `json:"ping_interval_ms"`
+}
 
 // LocationPayload is what location.update / location.broadcast carry.
 // Server-emitted broadcasts carry PairedUserIDs when the rider has an
