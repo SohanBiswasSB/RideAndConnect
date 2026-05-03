@@ -2,7 +2,6 @@ package realtime
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -106,22 +105,22 @@ func TestWS_LifecycleAndBroadcast(t *testing.T) {
 	cBob := dial("bob")
 	defer cBob.Close(websocket.StatusNormalClosure, "")
 
-	// Drain rider.online announcements both sides will see (alice's
-	// connect predates bob's so bob will receive nothing from alice's
-	// online event — but alice will receive bob's online).
+	// Drain rider.online announcements (alice will see bob's online
+	// event when bob connects).
 	drainUntil(t, cAlice, TypeRiderOnline, 2*time.Second)
 
-	// Alice publishes a location.update.
-	loc, _ := json.Marshal(LocationPayload{Latitude: 12.9716, Longitude: 77.5946})
+	// Alice publishes a location.update. With the codec layer, payloads
+	// are typed structs; the codec marshals them.
+	codec := NewCodec(cAlice.Subprotocol())
 	env := Envelope{
 		Type:       TypeLocationUpdate,
 		RideID:     rideID,
 		FromUserID: &alice,
 		Timestamp:  time.Now().UTC(),
-		Payload:    loc,
+		Payload:    LocationPayload{Latitude: 12.9716, Longitude: 77.5946},
 	}
-	body, _ := json.Marshal(env)
-	if err := cAlice.Write(context.Background(), websocket.MessageText, body); err != nil {
+	body, _ := codec.Marshal(env)
+	if err := cAlice.Write(context.Background(), codec.MessageType(), body); err != nil {
 		t.Fatalf("alice write: %v", err)
 	}
 
@@ -142,6 +141,7 @@ func TestWS_LifecycleAndBroadcast(t *testing.T) {
 // envelope.type matches `want` within timeout. Bool, not Envelope, so
 // callers can use it as a "did NOT receive" assertion.
 func readType(c *websocket.Conn, want string, timeout time.Duration) bool {
+	codec := NewCodec(c.Subprotocol())
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var hit atomic.Bool
@@ -154,7 +154,7 @@ func readType(c *websocket.Conn, want string, timeout time.Duration) bool {
 				return
 			}
 			var env Envelope
-			if json.Unmarshal(data, &env) == nil && env.Type == want {
+			if codec.Unmarshal(data, &env) == nil && env.Type == want {
 				hit.Store(true)
 				return
 			}
@@ -168,6 +168,7 @@ func readType(c *websocket.Conn, want string, timeout time.Duration) bool {
 // timeout fires. Fails the test on timeout.
 func readUntil(t *testing.T, c *websocket.Conn, want string, timeout time.Duration) Envelope {
 	t.Helper()
+	codec := NewCodec(c.Subprotocol())
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	for {
@@ -176,7 +177,7 @@ func readUntil(t *testing.T, c *websocket.Conn, want string, timeout time.Durati
 			t.Fatalf("read (waiting for %s): %v", want, err)
 		}
 		var env Envelope
-		if err := json.Unmarshal(data, &env); err != nil {
+		if err := codec.Unmarshal(data, &env); err != nil {
 			continue
 		}
 		if env.Type == want {

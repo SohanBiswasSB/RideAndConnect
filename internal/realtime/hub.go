@@ -2,7 +2,6 @@ package realtime
 
 import (
 	"context"
-	"encoding/json"
 	"sync"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 type ConnectionMetrics interface {
 	WSConnectionOpened()
 	WSConnectionClosed()
+	IncWSMessage(msgType, direction string)
 }
 
 // Hub owns one Room per active ride. Rooms are created lazily on first
@@ -62,9 +62,7 @@ func (h *Hub) dropRoom(rideID uuid.UUID) {
 	delete(h.rooms, rideID)
 }
 
-// LookupPresence is the seam consumed by the routes service. Returns the
-// last-known location for a (ride, user) pair, or false when no fresh
-// sample is available.
+// LookupPresence is the seam consumed by the routes service.
 func (h *Hub) LookupPresence(rideID, userID uuid.UUID) (LastLocation, bool) {
 	h.mu.RLock()
 	r, ok := h.rooms[rideID]
@@ -76,18 +74,12 @@ func (h *Hub) LookupPresence(rideID, userID uuid.UUID) (LastLocation, bool) {
 }
 
 // BroadcastEmergency pushes an emergency.triggered envelope to every
-// connected member of the ride (excluding the trigger themselves, who
-// already knows). Called from the rides service after the row is
-// committed.
+// connected member of the ride (excluding the trigger themselves).
 func (h *Hub) BroadcastEmergency(rideID, triggeredBy uuid.UUID, eventID uuid.UUID, triggeredByName string, message *string) {
-	body, err := json.Marshal(EmergencyPayload{
-		EventID:         eventID,
-		TriggeredBy:     triggeredBy,
-		TriggeredByName: triggeredByName,
-		Message:         message,
-	})
-	if err != nil {
-		h.log.Error().Err(err).Msg("emergency: marshal payload")
+	h.mu.RLock()
+	r, ok := h.rooms[rideID]
+	h.mu.RUnlock()
+	if !ok {
 		return
 	}
 	env := Envelope{
@@ -95,13 +87,12 @@ func (h *Hub) BroadcastEmergency(rideID, triggeredBy uuid.UUID, eventID uuid.UUI
 		RideID:     rideID,
 		Timestamp:  time.Now().UTC(),
 		FromUserID: &triggeredBy,
-		Payload:    body,
-	}
-	h.mu.RLock()
-	r, ok := h.rooms[rideID]
-	h.mu.RUnlock()
-	if !ok {
-		return
+		Payload: EmergencyPayload{
+			EventID:         eventID,
+			TriggeredBy:     triggeredBy,
+			TriggeredByName: triggeredByName,
+			Message:         message,
+		},
 	}
 	r.broadcast(env, &triggeredBy)
 }
@@ -109,58 +100,46 @@ func (h *Hub) BroadcastEmergency(rideID, triggeredBy uuid.UUID, eventID uuid.UUI
 // BroadcastDestination pushes destination.updated to every connected
 // member. Called from rides.SetDestination after commit.
 func (h *Hub) BroadcastDestination(rideID, byUser uuid.UUID, name string, lat, lng float64) {
-	body, err := json.Marshal(map[string]any{
-		"destination": map[string]any{
-			"name":      name,
-			"latitude":  lat,
-			"longitude": lng,
-		},
-		"set_by_user_id": byUser,
-	})
-	if err != nil {
+	h.mu.RLock()
+	r, ok := h.rooms[rideID]
+	h.mu.RUnlock()
+	if !ok {
 		return
 	}
 	env := Envelope{
 		Type:      TypeDestinationUpdated,
 		RideID:    rideID,
 		Timestamp: time.Now().UTC(),
-		Payload:   body,
-	}
-	h.mu.RLock()
-	r, ok := h.rooms[rideID]
-	h.mu.RUnlock()
-	if !ok {
-		return
+		Payload: map[string]any{
+			"destination": map[string]any{
+				"name": name, "lat": lat, "lng": lng,
+			},
+			"by": byUser,
+		},
 	}
 	r.broadcast(env, nil)
 }
 
 // BroadcastRideEnded fans out a final ride.ended message and instructs
-// every connection to close with the documented code. Called from
-// rides.End after commit.
+// every connection to close with the documented code.
 func (h *Hub) BroadcastRideEnded(rideID, endedBy uuid.UUID) {
-	body, _ := json.Marshal(map[string]any{
-		"ended_by_user_id": endedBy,
-		"reason":           "owner_ended",
-	})
-	env := Envelope{
-		Type:      TypeRideEnded,
-		RideID:    rideID,
-		Timestamp: time.Now().UTC(),
-		Payload:   body,
-	}
 	h.mu.RLock()
 	r, ok := h.rooms[rideID]
 	h.mu.RUnlock()
 	if !ok {
 		return
 	}
+	env := Envelope{
+		Type:      TypeRideEnded,
+		RideID:    rideID,
+		Timestamp: time.Now().UTC(),
+		Payload:   map[string]any{"by": endedBy, "reason": "owner_ended"},
+	}
 	r.broadcast(env, nil)
 	r.closeAll(CloseRideEnded, "ride ended")
 }
 
-// Stop closes every room and clears the registry. Called during
-// graceful shutdown. Idempotent — calling twice is harmless.
+// Stop closes every room and clears the registry. Idempotent.
 func (h *Hub) Stop(ctx context.Context) {
 	h.mu.Lock()
 	rooms := make([]*Room, 0, len(h.rooms))

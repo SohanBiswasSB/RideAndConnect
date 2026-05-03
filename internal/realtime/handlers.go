@@ -1,19 +1,17 @@
 package realtime
 
 import (
-	"encoding/json"
 	"errors"
-	"fmt"
 	"math"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-// handlePing replies pong with the same nonce. Heartbeat doubles as the
-// RTT probe per docs/WEBSOCKET_PROTOCOL.md §10.5.
+// handlePing replies pong with whatever the client sent (nonce / send_ts).
+// Server doesn't need pong-RTT for inbound pings — that path runs the
+// other direction (server pings, client ponged via handlePong).
 func (r *Room) handlePing(c *Connection, env Envelope) error {
-	// Echo whatever payload was supplied (including nonce + send_ts).
 	out := Envelope{
 		Type:      TypePong,
 		RideID:    r.rideID,
@@ -24,16 +22,43 @@ func (r *Room) handlePing(c *Connection, env Envelope) error {
 	return nil
 }
 
+// handlePong is the client's reply to a server-initiated ping. Used to
+// measure RTT for the bandwidth-tier classifier.
+func (r *Room) handlePong(c *Connection, env Envelope) error {
+	var p struct {
+		Nonce string `json:"nonce" cbor:"nonce"`
+	}
+	if env.Payload != nil {
+		// Best-effort decode; a malformed pong is harmless (we just
+		// won't update the RTT EWMA on this round-trip).
+		_ = c.payloadAs(env, &p)
+	}
+	if p.Nonce != "" {
+		c.recordPongRTT(p.Nonce)
+	}
+	return nil
+}
+
 // handleLocationUpdate validates the position, stores it in presence,
 // and fans out a location.broadcast to peers. If the sender is a paired
 // pillion, the update is silently discarded — the rider's broadcasts
 // already represent the pair.
+//
+// Server-side coalescing: when the inbound rate exceeds the per-tier
+// cap, we drop the message silently (no error response) — that saves
+// bytes on a tight link compared to telling the client to slow down.
 func (r *Room) handleLocationUpdate(c *Connection, env Envelope) error {
 	if env.FromUserID == nil || *env.FromUserID != c.userID {
 		return wsErr(CloseSpoofedSender, "from_user_id mismatch")
 	}
+	// Tier-aware silent drop: protects the link, doesn't punish the
+	// client with an error frame's worth of bytes.
+	if !c.inboundLoc.allow() {
+		return nil
+	}
+
 	var p LocationPayload
-	if err := json.Unmarshal(env.Payload, &p); err != nil {
+	if err := c.payloadAs(env, &p); err != nil {
 		return wsErr(CloseMalformed, "bad location payload")
 	}
 	if err := validateLocation(p); err != nil {
@@ -41,32 +66,33 @@ func (r *Room) handleLocationUpdate(c *Connection, env Envelope) error {
 		return nil
 	}
 
+	if c.metrics != nil {
+		c.metrics.IncWSMessage(TypeLocationUpdate, "in")
+	}
+
+	now := time.Now().UTC()
+
 	// Pair-aware suppression: if this user is a paired pillion, accept
 	// the position into our own state but DO NOT fan out (the rider's
 	// updates carry the pair).
 	if c.pairedAsPillionFor != uuid.Nil {
-		// silent drop; a future revision may emit `error{DEGRADED}`.
-		r.updatePresence(c.userID, LastLocation{Latitude: p.Latitude, Longitude: p.Longitude, At: time.Now().UTC()})
+		r.updatePresence(c.userID, LastLocation{Latitude: p.Latitude, Longitude: p.Longitude, At: now})
 		return nil
 	}
 
-	r.updatePresence(c.userID, LastLocation{Latitude: p.Latitude, Longitude: p.Longitude, At: time.Now().UTC()})
+	r.updatePresence(c.userID, LastLocation{Latitude: p.Latitude, Longitude: p.Longitude, At: now})
 
 	// If this user is the rider in an active pair, attach the pillion's
 	// user_id so peers render both icons co-located.
 	if c.pairedWithPillion != uuid.Nil {
 		p.PairedUserIDs = []uuid.UUID{c.pairedWithPillion}
 	}
-	out, err := json.Marshal(p)
-	if err != nil {
-		return fmt.Errorf("marshal location: %w", err)
-	}
 	bcast := Envelope{
 		Type:       TypeLocationBroadcast,
 		RideID:     r.rideID,
-		Timestamp:  time.Now().UTC(), // server-authoritative
+		Timestamp:  now, // server-authoritative
 		FromUserID: env.FromUserID,
-		Payload:    out,
+		Payload:    p,
 	}
 	r.broadcast(bcast, &c.userID)
 	return nil
@@ -88,10 +114,9 @@ func (r *Room) handleVoice(c *Connection, env Envelope) error {
 		return nil
 	}
 	var p VoicePayload
-	if err := json.Unmarshal(env.Payload, &p); err != nil {
+	if err := c.payloadAs(env, &p); err != nil {
 		return wsErr(CloseMalformed, "bad voice payload")
 	}
-	// Size guards from docs/WEBSOCKET_PROTOCOL.md §3.11.
 	if len(p.SDP) > 8*1024 {
 		c.sendError("VALIDATION_FAILED", "sdp too large")
 		return nil
@@ -106,7 +131,7 @@ func (r *Room) handleVoice(c *Connection, env Envelope) error {
 		Timestamp:  time.Now().UTC(),
 		FromUserID: env.FromUserID,
 		ToUserID:   env.ToUserID,
-		Payload:    env.Payload,
+		Payload:    p,
 	}
 	if !r.sendTo(*env.ToUserID, out) {
 		c.sendError("NOT_FOUND", "target peer not connected")
@@ -150,5 +175,3 @@ func validateLocation(p LocationPayload) error {
 	}
 	return nil
 }
-
-func jsonMarshal(v any) ([]byte, error) { return json.Marshal(v) }

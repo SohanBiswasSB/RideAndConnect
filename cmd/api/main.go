@@ -21,6 +21,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 
 	"github.com/SohanBiswasSB/rideandconnect/internal/audit"
 	"github.com/SohanBiswasSB/rideandconnect/internal/auth"
@@ -131,6 +133,7 @@ func run() error {
 	r.Use(middleware.Logger(log, metrics))
 	r.Use(middleware.Recoverer())
 	r.Use(middleware.MaxBodyBytes(64 * 1024))
+	r.Use(middleware.GzipRequestBody())
 	r.Use(middleware.CORS(cfg.CORSAllowedOrigins))
 	r.Use(middleware.RateLimitPerIP(cfg.RateLimitRPS))
 
@@ -142,10 +145,13 @@ func run() error {
 	// GraphQL: auth middleware attaches user_id when a Bearer is present;
 	// resolvers gate per-operation. WS upgrade lives at the same prefix.
 	r.Route("/api/v1", func(r chi.Router) {
+		// Persisted queries layer: rewrites hash-only requests to full
+		// queries before they reach the GraphQL handler.
+		pq := graph.PersistedQueryMiddleware()
 		if authSvc != nil {
-			r.With(middleware.RequireAuth(authSvc)).Post("/graphql", gqlHandler.ServeHTTP)
+			r.With(middleware.RequireAuth(authSvc), pq).Post("/graphql", gqlHandler.ServeHTTP)
 		} else {
-			r.Post("/graphql", gqlHandler.ServeHTTP)
+			r.With(pq).Post("/graphql", gqlHandler.ServeHTTP)
 		}
 		if authSvc != nil && ridesSvc != nil {
 			r.Get("/ws/rides/{rideId}", realtime.UpgradeHandler(hub, authSvc, ridesSvc, usersSvc, log))
@@ -154,9 +160,21 @@ func run() error {
 		}
 	})
 
+	// HTTP/2 cleartext (h2c) lets the same listener serve HTTP/1.1 and
+	// HTTP/2 over plain TCP. HTTP/2's HPACK header compression saves
+	// 200–400 B per GraphQL request (Authorization, Content-Type,
+	// User-Agent are all repeated and compressible). We don't terminate
+	// TLS here — production runs behind Caddy/NGINX which handles
+	// HTTPS+ALPN; h2c covers the dev path. WS connections don't
+	// negotiate h2 (still HTTP/1.1 Upgrade); h2c.NewHandler routes them
+	// through the inner handler unchanged.
+	h2s := &http2.Server{
+		IdleTimeout:     60 * time.Second,
+		ReadIdleTimeout: 60 * time.Second,
+	}
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           r,
+		Handler:           h2c.NewHandler(r, h2s),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,

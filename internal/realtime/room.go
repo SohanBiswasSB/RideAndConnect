@@ -3,14 +3,17 @@ package realtime
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
 
-// Room is a per-ride fan-out point. It owns the connection registry and
-// the in-memory presence store consumed by peerRoute.
+// Room is a per-ride fan-out point. It owns the connection registry,
+// the in-memory presence store consumed by peerRoute, and a monotonic
+// broadcast sequence number that lets reconnecting clients tell whether
+// they missed any messages.
 type Room struct {
 	rideID uuid.UUID
 	log    zerolog.Logger
@@ -18,6 +21,12 @@ type Room struct {
 	mu       sync.RWMutex
 	conns    map[uuid.UUID]*Connection // user_id → connection
 	presence map[uuid.UUID]LastLocation
+
+	// seq is incremented for every message the Room broadcasts. The
+	// system.hello sent on connect carries the current seq so the
+	// client can tell whether it missed any messages since its last
+	// connection (and ask for a snapshot if the gap is non-zero).
+	seq atomic.Uint64
 }
 
 func newRoom(rideID uuid.UUID, log zerolog.Logger) *Room {
@@ -28,6 +37,10 @@ func newRoom(rideID uuid.UUID, log zerolog.Logger) *Room {
 		presence: make(map[uuid.UUID]LastLocation),
 	}
 }
+
+// currentSeq returns the latest broadcast sequence number for this
+// room. Read by Connection.sendHello.
+func (r *Room) currentSeq() uint64 { return r.seq.Load() }
 
 // register adds a new connection. If a previous connection exists for the
 // same user, it is closed with CloseSuperseded — the latest connection
@@ -69,7 +82,11 @@ func (r *Room) lookupPresence(userID uuid.UUID) (LastLocation, bool) {
 // broadcast sends an envelope to every connection except the optional
 // excludeUser. Best-effort: a slow consumer is dropped (Connection's
 // send queue is bounded) rather than blocking the room.
+//
+// Stamps a monotonic seq into the envelope so reconnecting clients can
+// detect missed messages.
 func (r *Room) broadcast(env Envelope, excludeUser *uuid.UUID) {
+	env.Seq = r.seq.Add(1)
 	r.mu.RLock()
 	targets := make([]*Connection, 0, len(r.conns))
 	for uid, c := range r.conns {
@@ -115,13 +132,11 @@ func (r *Room) closeAll(code int, reason string) {
 // (rider.online) or terminates (rider.offline). The body carries just
 // the user_id; clients can fetch the name from rideMembers.
 func (r *Room) announcePresence(presenceType string, userID uuid.UUID, name string) {
-	body := PresencePayload{UserID: userID, Name: name}
-	bodyBytes, _ := jsonMarshal(body)
 	env := Envelope{
 		Type:      presenceType,
 		RideID:    r.rideID,
 		Timestamp: time.Now().UTC(),
-		Payload:   bodyBytes,
+		Payload:   PresencePayload{UserID: userID, Name: name},
 	}
 	r.broadcast(env, &userID)
 }
@@ -162,6 +177,8 @@ func (r *Room) dispatch(ctx context.Context, c *Connection, env Envelope) error 
 	switch env.Type {
 	case TypePing:
 		return r.handlePing(c, env)
+	case TypePong:
+		return r.handlePong(c, env)
 	case TypeLocationUpdate:
 		return r.handleLocationUpdate(c, env)
 	case TypeVoiceOffer, TypeVoiceAnswer, TypeVoiceICE:

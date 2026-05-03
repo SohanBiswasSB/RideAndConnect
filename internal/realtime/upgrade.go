@@ -13,15 +13,13 @@ import (
 )
 
 // AuthVerifier is the surface upgrade needs to authenticate the caller.
-// Implemented by *auth.Service.
 type AuthVerifier interface {
 	VerifyAccessToken(token string) (uuid.UUID, error)
 	VerifyWSTicket(token string) (uuid.UUID, error)
 }
 
 // MembershipChecker verifies the caller is an active member of the ride
-// AND tells us their pair role (rider with pillion / pillion of rider /
-// neither). Implemented by *rides.Service.
+// AND tells us their pair role.
 type MembershipChecker interface {
 	IsActiveMember(ctx context.Context, rideID, userID uuid.UUID) (bool, error)
 	IsPillionOf(ctx context.Context, rideID, userID uuid.UUID) (uuid.UUID, bool, error)
@@ -33,11 +31,13 @@ type UserNamer interface {
 	NameFor(ctx context.Context, userID uuid.UUID) (string, error)
 }
 
-// UpgradeHandler returns an http.Handler that performs the WS upgrade
-// for /api/v1/ws/rides/{rideId}.
+// UpgradeHandler returns an http.Handler for /api/v1/ws/rides/{rideId}.
 //
-// Auth: prefer Authorization: Bearer; fall back to ?access_token= which
-// must be a ws-ticket (issued via wsTicket mutation).
+// Negotiates:
+//   - Subprotocol (CBOR preferred, JSON fallback) via Sec-WebSocket-Protocol
+//   - permessage-deflate with context takeover for ~50% wire shrink
+//
+// Auth: Bearer header preferred, ?access_token= ws-ticket fallback.
 func UpgradeHandler(hub *Hub, auth AuthVerifier, members MembershipChecker, namer UserNamer, log zerolog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rideStr := chi.URLParam(r, "rideId")
@@ -63,7 +63,6 @@ func UpgradeHandler(hub *Hub, auth AuthVerifier, members MembershipChecker, name
 			return
 		}
 
-		// Pair role for this connection.
 		var pairedWith, pairedAs uuid.UUID
 		if rider, paired, err := members.IsPillionOf(r.Context(), rideID, userID); err == nil && paired {
 			pairedAs = rider
@@ -74,22 +73,35 @@ func UpgradeHandler(hub *Hub, auth AuthVerifier, members MembershipChecker, name
 		name, _ := namer.NameFor(r.Context(), userID)
 
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-			OriginPatterns:     []string{"*"}, // CORS handled at HTTP middleware
-			InsecureSkipVerify: false,
+			Subprotocols: SupportedSubprotocols,
+			// Context takeover keeps the deflate dictionary across
+			// frames within a single connection — biggest wire-shrink
+			// win for our repetitive location.broadcast hot path.
+			CompressionMode:      websocket.CompressionContextTakeover,
+			CompressionThreshold: 64,
+			OriginPatterns:       []string{"*"},
 		})
 		if err != nil {
 			log.Warn().Err(err).Msg("ws upgrade: accept failed")
 			return
 		}
 
+		codec := NewCodec(conn.Subprotocol())
+		log.Info().
+			Str("user_id", userID.String()).
+			Str("ride_id", rideID.String()).
+			Str("subprotocol", conn.Subprotocol()).
+			Str("codec", codec.Subprotocol()).
+			Msg("ws: upgraded")
+
 		room := hub.getOrCreateRoom(rideID)
-		c := newConnection(r.Context(), conn, room, userID, name, pairedWith, pairedAs, log, hub.MetricsSink())
+		c := newConnection(r.Context(), conn, codec, room, userID, name, pairedWith, pairedAs, log, hub.MetricsSink())
 		c.Run()
 	}
 }
 
 // authenticate prefers the Authorization header then the access_token
-// query param (which must be a ws-ticket).
+// query param (ws-ticket).
 func authenticate(r *http.Request, v AuthVerifier) (uuid.UUID, error) {
 	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 		tok := strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
