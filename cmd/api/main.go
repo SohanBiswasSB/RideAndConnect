@@ -287,11 +287,27 @@ func (a *activeProvider) Active() routes.Provider {
 	if a == nil || a.factory == nil {
 		return nil
 	}
-	p, err := a.factory.Get(a.name)
+	primary, err := a.factory.Get(a.name)
 	if err != nil {
 		return nil
 	}
-	return p
+	// Build a MultiProvider that tries the configured primary first and
+	// falls back through every other configured adapter. Single-adapter
+	// deployments behave identically to before; dual-adapter ones get a
+	// transparent fallback when the primary is down.
+	others := make([]routes.Provider, 0, 2)
+	for _, name := range a.factory.Names() {
+		if name == a.name {
+			continue
+		}
+		if p, err := a.factory.Get(name); err == nil {
+			others = append(others, p)
+		}
+	}
+	if len(others) == 0 {
+		return primary
+	}
+	return routes.NewMulti(append([]routes.Provider{primary}, others...)...)
 }
 
 // orDevSecret returns a stable dev fallback when JWT_SECRET is empty.

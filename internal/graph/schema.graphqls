@@ -134,6 +134,13 @@ type EmergencyEvent {
   resolvedByUserId:  UUID
 }
 
+type BBox {
+  minLat: Float!
+  minLng: Float!
+  maxLat: Float!
+  maxLng: Float!
+}
+
 type Route {
   rideId:           UUID!
   userId:           UUID!
@@ -147,6 +154,7 @@ type Route {
   travelMode:       TravelMode!
   computedAt:       DateTime!
   cacheHit:         Boolean!
+  bbox:             BBox
 }
 
 type PeerRoute {
@@ -164,6 +172,7 @@ type PeerRoute {
   travelMode:       TravelMode!
   computedAt:       DateTime!
   cacheHit:         Boolean!
+  bbox:             BBox
 }
 
 # ───── Inputs ─────

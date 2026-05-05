@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -25,6 +26,16 @@ func RateLimitPerIP(rps int) func(http.Handler) http.Handler {
 			if !rl.allow(ip) {
 				w.Header().Set("Retry-After", "1")
 				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				// GraphQL clients (Apollo, urql) don't surface non-2xx
+				// HTTP responses as GraphQL errors — they treat them as
+				// transport failures. Returning an `errors[]` body with
+				// status 200 lets the client's normal error handling
+				// path read the RATE_LIMITED extension and back off.
+				if strings.HasSuffix(r.URL.Path, "/graphql") {
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{"errors":[{"message":"too many requests","extensions":{"code":"RATE_LIMITED","retryAfterSeconds":1}}]}`))
+					return
+				}
 				w.WriteHeader(http.StatusTooManyRequests)
 				_, _ = w.Write([]byte(`{"error":{"code":"RATE_LIMITED","message":"too many requests"}}`))
 				return

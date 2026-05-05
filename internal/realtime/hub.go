@@ -15,6 +15,7 @@ type ConnectionMetrics interface {
 	WSConnectionOpened()
 	WSConnectionClosed()
 	IncWSMessage(msgType, direction string)
+	IncWSTierTransition(from, to string)
 }
 
 // Hub owns one Room per active ride. Rooms are created lazily on first

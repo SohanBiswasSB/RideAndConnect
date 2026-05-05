@@ -101,6 +101,92 @@ type ComputeResponse struct {
 	ComputedAt      time.Time
 }
 
+// BBox is a WGS84 bounding box in min/max form. Returned with route
+// results so mobile clients can pre-fetch map tiles for an offline
+// corridor (~500 m around the route polyline).
+type BBox struct {
+	MinLat, MinLng float64
+	MaxLat, MaxLng float64
+}
+
+// PolylineBBox decodes a Google-format encoded polyline and returns the
+// minimum bounding box, expanded by `bufferDeg` on each side. A buffer
+// of 0.005° corresponds to roughly 500 m. Returns ok=false on an
+// unparseable or empty input — caller should fall back to an OD-derived
+// bbox in that case.
+func PolylineBBox(encoded string, bufferDeg float64) (BBox, bool) {
+	pts := decodePolyline(encoded)
+	if len(pts) == 0 {
+		return BBox{}, false
+	}
+	minLat, maxLat := pts[0].Latitude, pts[0].Latitude
+	minLng, maxLng := pts[0].Longitude, pts[0].Longitude
+	for _, p := range pts[1:] {
+		if p.Latitude < minLat {
+			minLat = p.Latitude
+		}
+		if p.Latitude > maxLat {
+			maxLat = p.Latitude
+		}
+		if p.Longitude < minLng {
+			minLng = p.Longitude
+		}
+		if p.Longitude > maxLng {
+			maxLng = p.Longitude
+		}
+	}
+	return BBox{
+		MinLat: minLat - bufferDeg,
+		MinLng: minLng - bufferDeg,
+		MaxLat: maxLat + bufferDeg,
+		MaxLng: maxLng + bufferDeg,
+	}, true
+}
+
+// decodePolyline implements the Google polyline-encoding algorithm
+// (https://developers.google.com/maps/documentation/utilities/polylinealgorithm).
+// Inlined here so internal/routes has no third-party decode dependency.
+func decodePolyline(s string) []Point {
+	var pts []Point
+	var lat, lng int
+	i := 0
+	for i < len(s) {
+		dlat, n := decodePolylineInt(s[i:])
+		if n == 0 {
+			return nil
+		}
+		i += n
+		dlng, n2 := decodePolylineInt(s[i:])
+		if n2 == 0 {
+			return nil
+		}
+		i += n2
+		lat += dlat
+		lng += dlng
+		pts = append(pts, Point{Latitude: float64(lat) / 1e5, Longitude: float64(lng) / 1e5})
+	}
+	return pts
+}
+
+func decodePolylineInt(s string) (int, int) {
+	var result, shift int
+	for i := 0; i < len(s); i++ {
+		b := int(s[i]) - 63
+		if b < 0 {
+			return 0, 0
+		}
+		result |= (b & 0x1f) << shift
+		shift += 5
+		if b < 0x20 {
+			if result&1 != 0 {
+				return ^(result >> 1), i + 1
+			}
+			return result >> 1, i + 1
+		}
+	}
+	return 0, 0
+}
+
 // Capabilities is a static, per-provider description of which travel modes
 // the underlying API natively supports. The factory uses this for sanity
 // checks at startup. It does not vary by region — region-specific fallback

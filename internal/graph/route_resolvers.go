@@ -42,6 +42,24 @@ type routeResolver struct {
 	travelMode      string
 	computedAt      DateTime
 	cacheHit        bool
+	bbox            *bboxResolver
+}
+
+// bboxResolver maps routes.BBox onto the GraphQL BBox type.
+type bboxResolver struct {
+	minLat, minLng, maxLat, maxLng float64
+}
+
+func (b *bboxResolver) MinLat() float64 { return b.minLat }
+func (b *bboxResolver) MinLng() float64 { return b.minLng }
+func (b *bboxResolver) MaxLat() float64 { return b.maxLat }
+func (b *bboxResolver) MaxLng() float64 { return b.maxLng }
+
+func bboxFrom(b *routes.BBox) *bboxResolver {
+	if b == nil {
+		return nil
+	}
+	return &bboxResolver{minLat: b.MinLat, minLng: b.MinLng, maxLat: b.MaxLat, maxLng: b.MaxLng}
 }
 
 func (r *routeResolver) RideID() UUID                  { return r.rideID }
@@ -58,6 +76,7 @@ func (r *routeResolver) Provider() string         { return r.provider }
 func (r *routeResolver) TravelMode() string       { return r.travelMode }
 func (r *routeResolver) ComputedAt() DateTime     { return r.computedAt }
 func (r *routeResolver) CacheHit() bool           { return r.cacheHit }
+func (r *routeResolver) BBox() *bboxResolver      { return r.bbox }
 
 type peerRouteResolver struct {
 	rideID         UUID
@@ -76,6 +95,7 @@ type peerRouteResolver struct {
 	travelMode     string
 	computedAt     DateTime
 	cacheHit       bool
+	bbox           *bboxResolver
 }
 
 func (r *peerRouteResolver) RideID() UUID                       { return r.rideID }
@@ -92,6 +112,7 @@ func (r *peerRouteResolver) Provider() string                   { return r.provi
 func (r *peerRouteResolver) TravelMode() string                 { return r.travelMode }
 func (r *peerRouteResolver) ComputedAt() DateTime               { return r.computedAt }
 func (r *peerRouteResolver) CacheHit() bool                     { return r.cacheHit }
+func (r *peerRouteResolver) BBox() *bboxResolver                { return r.bbox }
 
 // MyRoute returns the most recent cached destination route for the caller.
 func (r *Resolver) MyRoute(ctx context.Context, args struct{ RideID UUID }) (*routeResolver, error) {
@@ -124,6 +145,7 @@ func (r *Resolver) MyRoute(ctx context.Context, args struct{ RideID UUID }) (*ro
 		travelMode:      string(res.TravelMode),
 		computedAt:      DateTime{T: res.ComputedAt},
 		cacheHit:        res.CacheHit,
+		bbox:            bboxFrom(res.BBox),
 	}, nil
 }
 
@@ -166,6 +188,7 @@ func (r *Resolver) ComputeRoute(ctx context.Context, args struct {
 		travelMode:      string(res.TravelMode),
 		computedAt:      DateTime{T: res.ComputedAt},
 		cacheHit:        res.CacheHit,
+		bbox:            bboxFrom(res.BBox),
 	}, nil
 }
 
@@ -223,5 +246,6 @@ func (r *Resolver) PeerRoute(ctx context.Context, args struct {
 		travelMode:      string(res.TravelMode),
 		computedAt:      DateTime{T: res.ComputedAt},
 		cacheHit:        res.CacheHit,
+		bbox:            bboxFrom(res.BBox),
 	}, nil
 }

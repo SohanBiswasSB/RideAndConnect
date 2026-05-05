@@ -176,7 +176,7 @@ func (c *Connection) readLoop() {
 			return
 		}
 		var env Envelope
-		if err := c.codec.Unmarshal(data, &env); err != nil {
+		if err := c.codec.DecodeEnvelope(data, &env); err != nil {
 			c.closeWith(CloseMalformed, "malformed envelope")
 			return
 		}
@@ -311,10 +311,14 @@ func (c *Connection) maybeChangeTier(rtt time.Duration) {
 	default:
 		next = TierHigh
 	}
-	if next == c.Tier() {
+	prev := c.Tier()
+	if next == prev {
 		return
 	}
 	c.tier.Store(next)
+	if c.metrics != nil {
+		c.metrics.IncWSTierTransition(prev, next)
+	}
 	cap, refill := inboundLocationRateForTier(next)
 	c.inboundLoc.retune(cap, refill)
 	c.log.Info().Str("tier", next).Int64("rtt_ms", ms).Msg("ws: tier changed")
@@ -456,16 +460,15 @@ func (c *Connection) closeWith(code int, reason string) {
 	c.cancel()
 }
 
-// payloadAs re-marshals env.Payload via the connection's codec and
-// decodes into out. Cheap round-trip — needed because Payload is
-// declared as `any` and the codec produces a generic value on decode.
+// payloadAs decodes the inbound payload bytes captured by
+// Codec.DecodeEnvelope directly into out — no marshal round-trip. The
+// fmt import is retained for other call sites that wrap codec errors.
 func (c *Connection) payloadAs(env Envelope, out any) error {
-	if env.Payload == nil {
+	if len(env.RawPayload) == 0 {
 		return nil
 	}
-	raw, err := c.codec.Marshal(env.Payload)
-	if err != nil {
-		return fmt.Errorf("marshal payload: %w", err)
+	if err := c.codec.Unmarshal(env.RawPayload, out); err != nil {
+		return fmt.Errorf("decode payload: %w", err)
 	}
-	return c.codec.Unmarshal(raw, out)
+	return nil
 }

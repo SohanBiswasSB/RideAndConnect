@@ -29,6 +29,12 @@ type Envelope struct {
 	ToUserID    *uuid.UUID     `json:"to,omitempty" cbor:"5,keyasint,omitempty"`
 	Seq         uint64         `json:"s,omitempty"  cbor:"6,keyasint,omitempty"`
 	Payload     any            `json:"p"            cbor:"7,keyasint"`
+
+	// RawPayload holds the encoded payload bytes from the inbound
+	// decode path so handlers can decode directly into a typed struct
+	// without re-marshaling Payload. Populated only by Codec.Decode;
+	// excluded from wire encoding.
+	RawPayload []byte `json:"-" cbor:"-"`
 }
 
 // Message types. Strings exactly match docs/WEBSOCKET_PROTOCOL.md §3.1.

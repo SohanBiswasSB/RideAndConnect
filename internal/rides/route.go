@@ -28,6 +28,7 @@ type RouteResult struct {
 	TravelMode      routes.TravelMode
 	ComputedAt      time.Time
 	CacheHit        bool
+	BBox            *routes.BBox
 }
 
 // PeerRouteResult is the peer-to-peer route response surfaced to
@@ -48,6 +49,7 @@ type PeerRouteResult struct {
 	TravelMode      routes.TravelMode
 	ComputedAt      time.Time
 	CacheHit        bool
+	BBox            *routes.BBox
 }
 
 // ComputeRouteInput is what the GraphQL resolver passes down for
@@ -261,11 +263,12 @@ func (s *Service) ComputeRoute(ctx context.Context, provider routes.Provider, ri
 
 	// Cache lookup.
 	if cached, ok, err := s.lookupRouteCache(ctx, "DESTINATION", rideID, callerID, nil, originGH, destGH, string(in.TravelMode)); err == nil && ok {
+		dst := routes.Point{Latitude: *destLat, Longitude: *destLng}
 		return &RouteResult{
 			RideID:          rideID,
 			UserID:          callerID,
 			Origin:          in.Origin,
-			Destination:     routes.Point{Latitude: *destLat, Longitude: *destLng},
+			Destination:     dst,
 			DestinationName: *destName,
 			DistanceMeters:  cached.DistanceMeters,
 			DurationSeconds: cached.DurationSeconds,
@@ -274,6 +277,7 @@ func (s *Service) ComputeRoute(ctx context.Context, provider routes.Provider, ri
 			TravelMode:      routes.TravelMode(cached.TravelMode),
 			ComputedAt:      cached.ComputedAt,
 			CacheHit:        true,
+			BBox:            computeBBox(cached.EncodedPolyline, in.Origin, dst),
 		}, nil
 	}
 
@@ -314,11 +318,12 @@ func (s *Service) ComputeRoute(ctx context.Context, provider routes.Provider, ri
 		resp.Provider, string(resp.TravelMode), time.Now().UTC().Add(s.engine.cacheTTL),
 	)
 
+	dst := routes.Point{Latitude: *destLat, Longitude: *destLng}
 	return &RouteResult{
 		RideID:          rideID,
 		UserID:          callerID,
 		Origin:          in.Origin,
-		Destination:     routes.Point{Latitude: *destLat, Longitude: *destLng},
+		Destination:     dst,
 		DestinationName: *destName,
 		DistanceMeters:  resp.DistanceMeters,
 		DurationSeconds: resp.DurationSeconds,
@@ -327,6 +332,7 @@ func (s *Service) ComputeRoute(ctx context.Context, provider routes.Provider, ri
 		TravelMode:      resp.TravelMode,
 		ComputedAt:      resp.ComputedAt,
 		CacheHit:        false,
+		BBox:            computeBBox(resp.EncodedPolyline, in.Origin, dst),
 	}, nil
 }
 
@@ -430,12 +436,14 @@ func (s *Service) PeerRoute(ctx context.Context, provider routes.Provider, prese
 	destGH := Geohash7(toLoc.Latitude, toLoc.Longitude)
 
 	if cached, ok, err := s.lookupRouteCache(ctx, "PEER", rideID, callerID, &peerID, originGH, destGH, string(in.TravelMode)); err == nil && ok {
+		from := routes.Point{Latitude: fromLoc.Latitude, Longitude: fromLoc.Longitude}
+		to := routes.Point{Latitude: toLoc.Latitude, Longitude: toLoc.Longitude}
 		return &PeerRouteResult{
 			RideID:          rideID,
 			FromUserID:      callerID,
 			ToUserID:        peerID,
-			From:            routes.Point{Latitude: fromLoc.Latitude, Longitude: fromLoc.Longitude},
-			To:              routes.Point{Latitude: toLoc.Latitude, Longitude: toLoc.Longitude},
+			From:            from,
+			To:              to,
 			FromAt:          fromLoc.At,
 			ToAt:            toLoc.At,
 			DistanceMeters:  cached.DistanceMeters,
@@ -445,6 +453,7 @@ func (s *Service) PeerRoute(ctx context.Context, provider routes.Provider, prese
 			TravelMode:      routes.TravelMode(cached.TravelMode),
 			ComputedAt:      cached.ComputedAt,
 			CacheHit:        true,
+			BBox:            computeBBox(cached.EncodedPolyline, from, to),
 		}, nil
 	}
 
@@ -485,12 +494,14 @@ func (s *Service) PeerRoute(ctx context.Context, provider routes.Provider, prese
 		resp.Provider, string(resp.TravelMode), now.Add(s.engine.peerCacheTTL),
 	)
 
+	from := routes.Point{Latitude: fromLoc.Latitude, Longitude: fromLoc.Longitude}
+	to := routes.Point{Latitude: toLoc.Latitude, Longitude: toLoc.Longitude}
 	return &PeerRouteResult{
 		RideID:          rideID,
 		FromUserID:      callerID,
 		ToUserID:        peerID,
-		From:            routes.Point{Latitude: fromLoc.Latitude, Longitude: fromLoc.Longitude},
-		To:              routes.Point{Latitude: toLoc.Latitude, Longitude: toLoc.Longitude},
+		From:            from,
+		To:              to,
 		FromAt:          fromLoc.At,
 		ToAt:            toLoc.At,
 		DistanceMeters:  resp.DistanceMeters,
@@ -500,6 +511,7 @@ func (s *Service) PeerRoute(ctx context.Context, provider routes.Provider, prese
 		TravelMode:      resp.TravelMode,
 		ComputedAt:      resp.ComputedAt,
 		CacheHit:        false,
+		BBox:            computeBBox(resp.EncodedPolyline, from, to),
 	}, nil
 }
 
@@ -532,11 +544,13 @@ func (s *Service) MyDestinationRoute(ctx context.Context, rideID, callerID uuid.
 		}
 		return nil, fmt.Errorf("rides: my route: %w", err)
 	}
+	origin := routes.Point{Latitude: oLat, Longitude: oLng}
+	dst := routes.Point{Latitude: dLat, Longitude: dLng}
 	out := &RouteResult{
 		RideID:          rideID,
 		UserID:          callerID,
-		Origin:          routes.Point{Latitude: oLat, Longitude: oLng},
-		Destination:     routes.Point{Latitude: dLat, Longitude: dLng},
+		Origin:          origin,
+		Destination:     dst,
 		DistanceMeters:  dist,
 		DurationSeconds: dur,
 		EncodedPolyline: poly,
@@ -544,6 +558,7 @@ func (s *Service) MyDestinationRoute(ctx context.Context, rideID, callerID uuid.
 		TravelMode:      routes.TravelMode(mode),
 		ComputedAt:      at,
 		CacheHit:        true,
+		BBox:            computeBBox(poly, origin, dst),
 	}
 	if destName != nil {
 		out.DestinationName = *destName
@@ -614,4 +629,39 @@ func ensureMemberPool(ctx context.Context, pool interface {
 // errors.Is(err, ErrThrottled).
 func throttleErr(wait time.Duration) error {
 	return fmt.Errorf("%w: retry in %s", ErrThrottled, wait.Round(time.Millisecond))
+}
+
+// routeCorridorBufferDeg is the latitude/longitude buffer added to the
+// polyline-derived bbox so mobile pre-fetch covers a corridor wider
+// than the path itself. ~0.005° ≈ 500 m at low/mid latitudes.
+const routeCorridorBufferDeg = 0.005
+
+// computeBBox returns a non-nil bbox for a successful route. Falls back
+// to an origin/destination rectangle when the polyline can't be parsed
+// — that still gives the client something to pre-fetch even though the
+// corridor coverage is weaker.
+func computeBBox(encoded string, origin, dest routes.Point) *routes.BBox {
+	if box, ok := routes.PolylineBBox(encoded, routeCorridorBufferDeg); ok {
+		return &box
+	}
+	minLat, maxLat := origin.Latitude, origin.Latitude
+	minLng, maxLng := origin.Longitude, origin.Longitude
+	if dest.Latitude < minLat {
+		minLat = dest.Latitude
+	}
+	if dest.Latitude > maxLat {
+		maxLat = dest.Latitude
+	}
+	if dest.Longitude < minLng {
+		minLng = dest.Longitude
+	}
+	if dest.Longitude > maxLng {
+		maxLng = dest.Longitude
+	}
+	return &routes.BBox{
+		MinLat: minLat - routeCorridorBufferDeg,
+		MinLng: minLng - routeCorridorBufferDeg,
+		MaxLat: maxLat + routeCorridorBufferDeg,
+		MaxLng: maxLng + routeCorridorBufferDeg,
+	}
 }

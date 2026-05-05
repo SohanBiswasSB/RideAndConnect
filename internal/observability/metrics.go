@@ -25,6 +25,7 @@ type Metrics struct {
 	RouteCacheLookups  *prometheus.CounterVec
 	EmergencyEvents    prometheus.Counter
 	PairEvents         *prometheus.CounterVec
+	WSTierTransitions  *prometheus.CounterVec
 }
 
 // New builds the registry with our process-local collectors plus the
@@ -63,10 +64,15 @@ func New() *Metrics {
 		prometheus.CounterOpts{Name: "pair_events_total", Help: "Rider/pillion pair lifecycle events."},
 		[]string{"event"},
 	)
+	m.WSTierTransitions = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "ws_tier_transitions_total", Help: "Bandwidth-tier transitions observed by the heartbeat classifier."},
+		[]string{"from", "to"},
+	)
 
 	reg.MustRegister(
 		m.HTTPRequests, m.WSConnections, m.WSMessages,
 		m.RouteProviderCalls, m.RouteCacheLookups, m.EmergencyEvents, m.PairEvents,
+		m.WSTierTransitions,
 	)
 	return m
 }
@@ -141,4 +147,13 @@ func (m *Metrics) IncPair(event string) {
 		return
 	}
 	m.PairEvents.WithLabelValues(event).Inc()
+}
+
+// IncWSTierTransition records a bandwidth-tier change so the RTT
+// thresholds can be tuned against real rider data.
+func (m *Metrics) IncWSTierTransition(from, to string) {
+	if m == nil {
+		return
+	}
+	m.WSTierTransitions.WithLabelValues(from, to).Inc()
 }

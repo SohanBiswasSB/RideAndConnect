@@ -2,6 +2,7 @@ package graph
 
 import (
 	"bytes"
+	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,13 @@ import (
 	"net/http"
 	"sync"
 )
+
+// persistedCacheCapacity bounds the APQ cache. Any client can register
+// arbitrary query strings under a hash they computed themselves; without
+// a cap, an adversarial or buggy client could grow the map unboundedly.
+// A few-hundred-entry LRU is well above the realistic distinct-query
+// count (~20) and trivially small in memory.
+const persistedCacheCapacity = 1024
 
 // PersistedQueryMiddleware implements the Apollo Persisted Queries
 // (APQ) protocol. Clients send only a SHA-256 hash on subsequent
@@ -37,11 +45,9 @@ import (
 // Client retries with the full `query` field; server caches it under
 // the hash and dispatches normally.
 //
-// The cache is in-memory (sync.Map) and unbounded — fine for our
-// expected client query set (~20 unique queries). For a public API
-// you'd want an LRU.
+// The cache is an in-memory bounded LRU — see persistedCacheCapacity.
 func PersistedQueryMiddleware() func(http.Handler) http.Handler {
-	cache := &persistedCache{}
+	cache := newPersistedCache(persistedCacheCapacity)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
@@ -126,19 +132,59 @@ func computedHash(query string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// persistedCache is a bounded LRU keyed by query hash. Eviction is
+// strictly least-recently-used: a get or set bumps the entry to the
+// front, and overflow drops from the back. Safe for concurrent use.
 type persistedCache struct {
-	m sync.Map // hash → query
+	mu    sync.Mutex
+	cap   int
+	items map[string]*list.Element // hash → list element
+	order *list.List               // front = most recent
+}
+
+type persistedEntry struct {
+	hash  string
+	query string
+}
+
+func newPersistedCache(capacity int) *persistedCache {
+	return &persistedCache{
+		cap:   capacity,
+		items: make(map[string]*list.Element, capacity),
+		order: list.New(),
+	}
 }
 
 func (c *persistedCache) get(h string) (string, bool) {
-	v, ok := c.m.Load(h)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	el, ok := c.items[h]
 	if !ok {
 		return "", false
 	}
-	return v.(string), true
+	c.order.MoveToFront(el)
+	return el.Value.(*persistedEntry).query, true
 }
 
-func (c *persistedCache) set(h, q string) { c.m.Store(h, q) }
+func (c *persistedCache) set(h, q string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if el, ok := c.items[h]; ok {
+		el.Value.(*persistedEntry).query = q
+		c.order.MoveToFront(el)
+		return
+	}
+	el := c.order.PushFront(&persistedEntry{hash: h, query: q})
+	c.items[h] = el
+	for c.order.Len() > c.cap {
+		oldest := c.order.Back()
+		if oldest == nil {
+			break
+		}
+		c.order.Remove(oldest)
+		delete(c.items, oldest.Value.(*persistedEntry).hash)
+	}
+}
 
 var errPQNotFound = errors.New("persisted query not found")
 
